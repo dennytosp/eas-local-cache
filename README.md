@@ -6,7 +6,21 @@ EAS Local Cache is a library designed to optimize build times by caching build a
 
 ## Installation
 
-To install EAS Local Cache, add the following configuration to your `app.config.ts`:
+To install EAS Local Cache, select your preferred package manager:
+
+### npm
+
+```bash
+npm install --save-dev eas-local-cache
+```
+
+### bun
+
+```bash
+bun add eas-local-cache -D
+```
+
+Add the following configuration to your `app.config.ts`:
 
 ```typescript
 experiments: {
