@@ -1,6 +1,6 @@
 {
   "name": "eas-local-cache",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A custom build cache provider for Expo CLI. Uses local to store builds.",
   "main": "build/index.js",
   "types": "build/index.d.ts",
