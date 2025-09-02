@@ -1,0 +1,30 @@
+{
+  "name": "eas-local-cache",
+  "version": "1.0.0",
+  "description": "A custom build cache provider for Expo CLI. Uses local to store builds.",
+  "main": "build/index.js",
+  "types": "build/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "prepack": "bun run build"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dennytosp/eas-local-cache.git"
+  },
+  "keywords": [
+    "expo",
+    "expo-cache",
+    "eas-cache"
+  ],
+  "author": "mad.dinh",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/dennytosp/eas-local-cache/issues"
+  },
+  "homepage": "https://github.com/dennytosp/eas-local-cache#readme",
+  "devDependencies": {
+    "expo-module-scripts": "^4.1.10",
+    "typescript": "^5.9.2"
+  }
+}

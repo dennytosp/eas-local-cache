@@ -1,0 +1,17 @@
+# dependencies (bun install)
+node_modules
+
+# output
+out
+dist
+build
+*.tgz
+
+# code coverage
+coverage
+*.lcov
+
+# Finder (MacOS) folder config
+.DS_Store
+
+*.lock
