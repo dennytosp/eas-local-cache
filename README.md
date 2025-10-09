@@ -48,7 +48,7 @@ The system generates a unique fingerprint hash for each build configuration. If 
 
 ## Cache Storage
 
-Build artifacts are stored in the `expo/cache` directory at the project root.
+Build artifacts are stored in the `.expo/cache` directory at the project root.
 
 Files are named according to the pattern:
 
@@ -59,10 +59,10 @@ Files are named according to the pattern:
 
 EAS Local Cache is automatically used by Expo when building your application. No additional configuration is required.
 
-To clear the cache manually, you can delete the `expo/cache` directory in your project root:
+To clear the cache manually, you can delete the `.expo/cache` directory in your project root:
 
 ```bash
-rm -rf expo/cache
+rm -rf .expo/cache
 ```
 
 ## Troubleshooting
