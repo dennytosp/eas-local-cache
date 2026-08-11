@@ -66,6 +66,24 @@ jobs:
       - name: Fetch main
         run: git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
 
+      # Drop the previous run's bump before recomputing. Without this,
+      # relabelling stacks a second bump commit on top of the first and leaves
+      # the CHANGELOG heading naming the version that is no longer being
+      # released. Only ever unwinds this workflow's own commit — a human push
+      # on top makes HEAD something else, and nothing is touched.
+      - name: Unwind the previous bump
+        id: unwind
+        run: |
+          if [ "$(git log -1 --format=%an)" = "github-actions[bot]" ]; then
+            case "$(git log -1 --format=%s)" in
+              ":bookmark: Bump version to "*)
+                echo "Dropping $(git log -1 --format=%s) to recompute from scratch."
+                git reset --hard HEAD~1
+                echo "unwound=true" >> "$GITHUB_OUTPUT"
+                ;;
+            esac
+          fi
+
       - name: Work out the target version
         id: target
         env:
@@ -118,16 +136,25 @@ jobs:
         env:
           TARGET: ${{ steps.target.outputs.target }}
           BRANCH: ${{ github.event.pull_request.head.ref }}
+          UNWOUND: ${{ steps.unwind.outputs.unwound }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           git add package.json CHANGELOG.md
 
+          # Nothing staged means the recomputed result matches what is already
+          # on the branch, so the remote is left exactly as it is — including
+          # in the unwound case, where the commit that was dropped locally was
+          # already correct.
           if git diff --cached --quiet; then
             echo "Already set to $TARGET. Nothing to commit."
             exit 0
           fi
 
           git commit -m ":bookmark: Bump version to $TARGET"
-          git push origin "HEAD:$BRANCH"
+
+          # `--force-with-lease` only because the previous bump was unwound.
+          # It refuses if anyone pushed since this job fetched, so a
+          # contributor's work cannot be overwritten.
+          git push --force-with-lease origin "HEAD:$BRANCH"
