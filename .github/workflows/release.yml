@@ -1,0 +1,177 @@
+name: Release
+
+# Publishes to npm when the version in package.json changes on `main`.
+#
+# The semver decision stays human: bump `package.json` in a pull request.
+# Merging that pull request is what releases. Everything after the merge —
+# publish, tag, GitHub Release — happens here. Pushes that do not change the
+# version are compared against the registry and skipped, so ordinary commits
+# never publish.
+#
+# Authentication uses npm trusted publishing (OIDC). There is no token to
+# store or rotate. Configure it once, at
+# https://www.npmjs.com/package/eas-local-cache/access
+# -> Trusted Publisher:
+#
+#   Organization or user:  dennytosp
+#   Repository:            eas-local-cache
+#   Workflow filename:     release.yml
+#   Environment name:      (leave blank)
+#
+# Until a trusted publisher is configured, the workflow falls back to an
+# `NPM_TOKEN` repository secret if one exists.
+
+on:
+  push:
+    branches: [main]
+    paths: ["package.json"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Check for an unpublished version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      publish: ${{ steps.check.outputs.publish }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - id: check
+        run: |
+          NAME="$(node -p "require('./package.json').name")"
+          VERSION="$(node -p "require('./package.json').version")"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          # Ask the registry once for every published version.
+          #
+          # `npm view pkg@version` exits non-zero both when the version is
+          # genuinely unpublished and when the registry is unreachable, so
+          # using it directly would read a network blip as "not released yet"
+          # and try to publish. Fetch the version list instead and tell the two
+          # cases apart explicitly.
+          set +e
+          VERSIONS="$(npm view "$NAME" versions --json 2>&1)"
+          STATUS=$?
+          set -e
+
+          if [ "$STATUS" -ne 0 ]; then
+            if printf '%s' "$VERSIONS" | grep -q 'E404'; then
+              echo "$NAME has never been published. Releasing $VERSION."
+              echo "publish=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::error::Could not reach the npm registry for $NAME"
+            printf '%s\n' "$VERSIONS"
+            exit 1
+          fi
+
+          # A package with a single published version returns a bare string
+          # rather than an array.
+          if printf '%s' "$VERSIONS" | node -e '
+            let raw = "";
+            process.stdin.on("data", (chunk) => (raw += chunk));
+            process.stdin.on("end", () => {
+              const parsed = JSON.parse(raw);
+              const all = Array.isArray(parsed) ? parsed : [parsed];
+              process.exit(all.includes(process.argv[1]) ? 0 : 1);
+            });
+          ' "$VERSION"; then
+            echo "$NAME@$VERSION is already on npm. Nothing to release."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "$NAME@$VERSION is not on npm. Releasing."
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  release:
+    name: Publish v${{ needs.check.outputs.version }}
+    needs: check
+    if: needs.check.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    permissions:
+      contents: write # push the version tag and create the GitHub Release
+      id-token: write # OIDC for trusted publishing and provenance
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      # Trusted publishing needs npm 11.5.1 or newer. The npm bundled with
+      # Node 22 predates it.
+      - name: Use an npm that supports trusted publishing
+        run: npm install --global npm@latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Test
+        run: bun test
+
+      - name: Build
+        run: bun run build
+
+      # Publishing comes before tagging on purpose: a failed publish should not
+      # leave a tag claiming a release that does not exist.
+      - name: Publish to npm
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Tag and create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          TAG="v$VERSION"
+
+          # npm is already published by this point, so a pre-existing tag or
+          # release is reported and stepped over rather than failing the run.
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" > /dev/null 2>&1; then
+            echo "::notice::Tag $TAG already exists on the remote. Leaving it as is."
+          else
+            git tag "$TAG"
+            git push origin "$TAG"
+          fi
+
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "::notice::Release $TAG already exists. Leaving it as is."
+            exit 0
+          fi
+
+          # Prefer the matching CHANGELOG section; fall back to generated notes
+          # when this version has no entry.
+          NOTES="$RUNNER_TEMP/release-notes.md"
+          awk -v header="## [$VERSION]" '
+            index($0, header) == 1 { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > "$NOTES"
+
+          if grep -q '[^[:space:]]' "$NOTES"; then
+            gh release create "$TAG" --title "$TAG" --notes-file "$NOTES"
+          else
+            gh release create "$TAG" --title "$TAG" --generate-notes
+          fi

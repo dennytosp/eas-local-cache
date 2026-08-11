@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or usage help
+    url: https://github.com/dennytosp/eas-local-cache/discussions
+    about: Ask how to wire the cache provider into your project.
+  - name: Expo build cache providers documentation
+    url: https://docs.expo.dev/guides/cache-builds-remotely/
+    about: How Expo's buildCacheProvider API works, including fingerprinting.

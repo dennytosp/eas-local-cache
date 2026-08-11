@@ -1,5 +1,11 @@
 # EAS Local Cache
 
+[![CI](https://github.com/dennytosp/eas-local-cache/actions/workflows/ci.yml/badge.svg)](https://github.com/dennytosp/eas-local-cache/actions/workflows/ci.yml)
+[![npm version](https://img.shields.io/npm/v/eas-local-cache.svg)](https://www.npmjs.com/package/eas-local-cache)
+[![npm downloads](https://img.shields.io/npm/dm/eas-local-cache.svg)](https://www.npmjs.com/package/eas-local-cache)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](./CONTRIBUTING.md)
+
 ## Introduction
 
 EAS Local Cache is a library designed to optimize build times by caching build artifacts locally. This allows subsequent builds with the same configuration to reuse previously built artifacts instead of rebuilding them from scratch.
@@ -75,8 +81,32 @@ If you're experiencing issues with cached builds:
 
 ## Contributing
 
-To contribute to this library:
+Contributions are welcome — bug reports, docs fixes, and cache-correctness fixes
+especially.
 
-1. Make changes to the implementation in `eas-local-cache`.
-2. Test with various build configurations.
-3. Submit pull requests with clear descriptions of changes and benefits.
+```bash
+git clone https://github.com/dennytosp/eas-local-cache.git
+cd eas-local-cache
+bun install
+
+bun run typecheck   # tsc --noEmit over src/ and test/
+bun test            # integration tests against a temporary project root
+bun run build       # tsc -> build/
+```
+
+These three commands are exactly what CI runs on every pull request, on both
+Ubuntu and macOS. See [CONTRIBUTING.md](./CONTRIBUTING.md) for the full guide
+(including how to link the plugin into a real Expo app), and
+[CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md) for community expectations.
+
+- Found a bug? [Open an issue](https://github.com/dennytosp/eas-local-cache/issues/new?template=bug_report.yml)
+- Have a usage question? [Start a discussion](https://github.com/dennytosp/eas-local-cache/discussions)
+- Found a security problem? See [SECURITY.md](./SECURITY.md) — please do not open a public issue
+
+## Changelog
+
+See [CHANGELOG.md](./CHANGELOG.md).
+
+## License
+
+[MIT](./LICENSE) © Phong Dinh
