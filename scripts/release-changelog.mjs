@@ -49,15 +49,21 @@ if (body.trim() === "") {
 const released = `## [${version}] - ${date}\n\n${body.trim()}\n\n`;
 
 let updated =
-  original.slice(0, start) + `${HEADING}\n\n` + released + original.slice(bodyEnd);
+  original.slice(0, start) +
+  `${HEADING}\n\n` +
+  released +
+  original.slice(bodyEnd);
 
 // Repoint `[unreleased]` at the new tag and add a compare link for this
 // version, reusing whatever host and repository path the file already uses.
-const unreleasedLink = /^\[unreleased\]:\s*(\S+?)\/compare\/(\S+?)\.\.\.HEAD\s*$/im;
+const unreleasedLink =
+  /^\[unreleased\]:\s*(\S+?)\/compare\/(\S+?)\.\.\.HEAD\s*$/im;
 const match = updated.match(unreleasedLink);
 
 if (!match) {
-  console.error(`${FILE} has no "[unreleased]: .../compare/<tag>...HEAD" link.`);
+  console.error(
+    `${FILE} has no "[unreleased]: .../compare/<tag>...HEAD" link.`
+  );
   process.exit(1);
 }
 

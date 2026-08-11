@@ -69,7 +69,10 @@ const makeAppBundle = (name: string) => {
 
 describe("resolveBuildCache", () => {
   it("returns null when nothing has been cached", async () => {
-    const result = await resolveBuildCache(resolveProps("android", "abc123"), {});
+    const result = await resolveBuildCache(
+      resolveProps("android", "abc123"),
+      {}
+    );
     expect(result).toBeNull();
   });
 
@@ -151,7 +154,10 @@ describe("uploadBuildCache", () => {
 
     const second = makeAppBundle("Second.app");
     fs.writeFileSync(path.join(second, "Contents", "marker"), "v2");
-    const cached = await uploadBuildCache(uploadProps("ios", "same", second), {});
+    const cached = await uploadBuildCache(
+      uploadProps("ios", "same", second),
+      {}
+    );
 
     expect(fs.existsSync(path.join(cached!, "Contents", "marker"))).toBe(true);
   });

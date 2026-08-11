@@ -107,7 +107,7 @@ const verifyCacheFile = (cachePath: string, platform: string): boolean => {
 };
 
 const plugin: BuildCacheProviderPlugin = {
-  resolveBuildCache: async (props: ResolveBuildCacheProps, options) => {
+  resolveBuildCache: async (props: ResolveBuildCacheProps, _options) => {
     const { fingerprintHash, platform, projectRoot } = props;
     console.log(
       `Searching for cached build with fingerprint: ${fingerprintHash}`
@@ -132,7 +132,7 @@ const plugin: BuildCacheProviderPlugin = {
     return null;
   },
 
-  uploadBuildCache: async (props: UploadBuildCacheProps, options) => {
+  uploadBuildCache: async (props: UploadBuildCacheProps, _options) => {
     const { fingerprintHash, platform, buildPath, projectRoot } = props;
     console.log(
       `Uploading build for ${platform} with fingerprint: ${fingerprintHash}`
