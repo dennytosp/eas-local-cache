@@ -44,7 +44,7 @@ jobs:
       publish: ${{ steps.check.outputs.publish }}
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - id: check
         run: |
@@ -105,7 +105,7 @@ jobs:
       id-token: write # OIDC for trusted publishing and provenance
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: oven-sh/setup-bun@v2
         with:
