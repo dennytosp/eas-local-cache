@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The cache directory was resolved from `process.cwd()` at module load instead
+  of from the `projectRoot` Expo passes in. Those differ whenever the CLI runs
+  from a subdirectory, from a monorepo root, or with `--project-root`, and the
+  result was a cache written somewhere the next build never looked — a silent
+  permanent cache miss rather than a visible error.
+
 ### Added
 
 - MIT `LICENSE` file (the package was already declared MIT in `package.json`).
@@ -14,10 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   build, and package verification on every push and pull request.
 - Integration tests covering cache miss, `.apk` file caching, `.app` bundle
   caching, overwrite, and round-trip resolve.
-- Release workflow: bumping the version in `package.json` and merging to `main`
+- Label-driven releases. A pull request labelled `release:minor` /
+  `release:major` (or left unlabelled, for a patch) gets its version and
+  CHANGELOG section written into the branch before merge; merging then
   publishes to npm with provenance, pushes the `v<version>` tag, and opens a
-  GitHub Release from this file. Pushes that do not change the version are
-  skipped.
+  GitHub Release from this file. `release:skip` publishes nothing.
 - `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`, issue and pull request
   templates, and Dependabot configuration.
 
