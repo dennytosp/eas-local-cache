@@ -28,8 +28,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write # push the version tag and create the GitHub Release
-  id-token: write # OIDC for trusted publishing and provenance
+  contents: read
 
 concurrency:
   group: release
@@ -53,9 +52,40 @@ jobs:
           VERSION="$(node -p "require('./package.json').version")"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-          # `npm view pkg@version` exits non-zero when that exact version is
-          # not on the registry — which is precisely the case worth publishing.
-          if npm view "$NAME@$VERSION" version > /dev/null 2>&1; then
+          # Ask the registry once for every published version.
+          #
+          # `npm view pkg@version` exits non-zero both when the version is
+          # genuinely unpublished and when the registry is unreachable, so
+          # using it directly would read a network blip as "not released yet"
+          # and try to publish. Fetch the version list instead and tell the two
+          # cases apart explicitly.
+          set +e
+          VERSIONS="$(npm view "$NAME" versions --json 2>&1)"
+          STATUS=$?
+          set -e
+
+          if [ "$STATUS" -ne 0 ]; then
+            if printf '%s' "$VERSIONS" | grep -q 'E404'; then
+              echo "$NAME has never been published. Releasing $VERSION."
+              echo "publish=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::error::Could not reach the npm registry for $NAME"
+            printf '%s\n' "$VERSIONS"
+            exit 1
+          fi
+
+          # A package with a single published version returns a bare string
+          # rather than an array.
+          if printf '%s' "$VERSIONS" | node -e '
+            let raw = "";
+            process.stdin.on("data", (chunk) => (raw += chunk));
+            process.stdin.on("end", () => {
+              const parsed = JSON.parse(raw);
+              const all = Array.isArray(parsed) ? parsed : [parsed];
+              process.exit(all.includes(process.argv[1]) ? 0 : 1);
+            });
+          ' "$VERSION"; then
             echo "$NAME@$VERSION is already on npm. Nothing to release."
             echo "publish=false" >> "$GITHUB_OUTPUT"
           else
@@ -69,6 +99,10 @@ jobs:
     if: needs.check.outputs.publish == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+
+    permissions:
+      contents: write # push the version tag and create the GitHub Release
+      id-token: write # OIDC for trusted publishing and provenance
 
     steps:
       - uses: actions/checkout@v5
@@ -111,19 +145,33 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.check.outputs.version }}
         run: |
-          git tag "v$VERSION"
-          git push origin "v$VERSION"
+          TAG="v$VERSION"
+
+          # npm is already published by this point, so a pre-existing tag or
+          # release is reported and stepped over rather than failing the run.
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" > /dev/null 2>&1; then
+            echo "::notice::Tag $TAG already exists on the remote. Leaving it as is."
+          else
+            git tag "$TAG"
+            git push origin "$TAG"
+          fi
+
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            echo "::notice::Release $TAG already exists. Leaving it as is."
+            exit 0
+          fi
 
           # Prefer the matching CHANGELOG section; fall back to generated notes
           # when this version has no entry.
+          NOTES="$RUNNER_TEMP/release-notes.md"
           awk -v header="## [$VERSION]" '
             index($0, header) == 1 { found = 1; next }
             found && /^## / { exit }
             found { print }
-          ' CHANGELOG.md > release-notes.md
+          ' CHANGELOG.md > "$NOTES"
 
-          if [ -s release-notes.md ] && grep -q '[^[:space:]]' release-notes.md; then
-            gh release create "v$VERSION" --title "v$VERSION" --notes-file release-notes.md
+          if grep -q '[^[:space:]]' "$NOTES"; then
+            gh release create "$TAG" --title "$TAG" --notes-file "$NOTES"
           else
-            gh release create "v$VERSION" --title "v$VERSION" --generate-notes
+            gh release create "$TAG" --title "$TAG" --generate-notes
           fi
