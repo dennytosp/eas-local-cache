@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Dependabot updates now skip npm publishing by default. Explicit package
+  version increases publish after required CI, while version decreases are
+  rejected.
+
 ## [1.0.4] - 2026-08-11
 
 ### Fixed

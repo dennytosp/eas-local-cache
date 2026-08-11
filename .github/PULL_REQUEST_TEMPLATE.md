@@ -24,7 +24,8 @@
 
 <!-- Select exactly one. See RELEASING.md for the label commands. -->
 
-- [ ] Skip npm release — no `release:*` label
+- [ ] Skip npm release — no `release:*` label and package version unchanged
+- [ ] Exact version — increase `package.json.version`, no release label
 - [ ] Patch — `release:patch`
 - [ ] Minor — `release:minor`
 - [ ] Major — `release:major`
