@@ -117,9 +117,10 @@ CI checks to pass before the pull request can be merged into `main`.
 
 After the merged `main` commit passes CI, the release workflow examines every
 merged change since the latest `v*` tag. It uses the highest requested decision
-— major, then minor, then patch — and commits the version and CHANGELOG update
-directly to `main`. A stale CI run does nothing when a newer `main` commit is
-already being verified.
+— major, then minor, then patch — and creates the version and CHANGELOG commit.
+That exact commit must pass required CI on a temporary release branch before it
+can fast-forward protected `main`. A stale CI run does nothing when a newer
+`main` commit is already being verified.
 
 The same workflow dispatches `release.yml` for that exact commit and waits for
 it to finish. The release repeats the quality checks, publishes to npm with
