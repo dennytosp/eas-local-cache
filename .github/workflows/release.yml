@@ -111,7 +111,7 @@ jobs:
 
       - name: Install dependencies
         if: needs.check.outputs.publish == 'true'
-        run: bun install
+        run: bun install --frozen-lockfile
 
       - name: Format
         if: needs.check.outputs.publish == 'true'
