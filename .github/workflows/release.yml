@@ -1,20 +1,19 @@
 name: Release
 
-# The post-merge workflow calls this file with the exact version-bump commit.
+# The post-merge workflow dispatches this file with the exact version-bump commit.
 # Manual dispatch remains available to repair an interrupted npm publish, tag,
 # or GitHub Release without incrementing the version again.
 
 on:
-  workflow_call:
+  workflow_dispatch:
     inputs:
       ref:
         description: Commit containing the version to release
-        required: true
+        required: false
         type: string
   push:
     branches: [main]
     paths: ["package.json"]
-  workflow_dispatch:
 
 permissions:
   contents: read

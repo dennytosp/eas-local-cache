@@ -28,10 +28,8 @@ jobs:
     timeout-minutes: 10
 
     permissions:
+      actions: write
       contents: write
-
-    outputs:
-      release_sha: ${{ steps.release.outputs.sha }}
 
     steps:
       # pull_request_target has a write-capable token. Only trusted code from
@@ -90,13 +88,12 @@ jobs:
 
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-  publish:
-    name: Publish the main release
-    needs: prepare
-    if: needs.prepare.outputs.release_sha != ''
-    permissions:
-      contents: write
-      id-token: write
-    uses: ./.github/workflows/release.yml
-    with:
-      ref: ${{ needs.prepare.outputs.release_sha }}
+      # npm validates the workflow that starts a run. Dispatching release.yml
+      # preserves its trusted-publisher identity; workflow_call would expose
+      # bump.yml as the caller and fail npm authentication.
+      - name: Dispatch the release
+        if: steps.decision.outputs.bump != 'skip'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+        run: gh workflow run release.yml --ref main --field ref="$RELEASE_SHA"
