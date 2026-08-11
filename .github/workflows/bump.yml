@@ -1,167 +1,137 @@
-name: Bump version
+name: Prepare release
 
-# Writes the version a pull request will release into the pull request itself,
-# so the number is visible — and editable — before anyone merges.
-#
-#   release:skip    no bump; merging publishes nothing
-#   release:major   next major after the version on `main`
-#   release:minor   next minor
-#   (no label)      next patch
-#
-# The target is always computed from `main`, never from the pull request's own
-# package.json, so re-running this cannot make the version climb: label a pull
-# request minor, then major, then minor again, and it lands on the same number
-# it would have had the first time.
-#
-# The bump lives here rather than in the release workflow because `main`
-# requires a pull request, and the Actions bot cannot push to it. Merging the
-# pull request is what carries the bump commit onto `main`, through the front
-# door.
-#
-# Note: GitHub does not run workflows for a push made with GITHUB_TOKEN. It
-# creates the run and parks it as `action_required` with no jobs, so CI does
-# not re-run on the bump commit. That commit only rewrites the version field
-# and moves a CHANGELOG heading — the code CI already verified is byte-for-byte
-# the same. If you want a green tick on the exact commit being merged, approve
-# the parked CI run from the Actions tab (approve CI, not this workflow).
+# Source pull requests never receive version commits. After a pull request is
+# merged, this workflow aggregates every merged change since the latest v* tag
+# and creates or refreshes one protected-path release pull request.
 
 on:
-  pull_request:
+  pull_request_target:
     branches: [main]
-    types: [opened, reopened, synchronize, labeled, unlabeled]
+    types: [closed]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: bump-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  group: prepare-release
+  cancel-in-progress: false
 
 jobs:
-  bump:
-    name: Set the release version
+  prepare:
+    name: Create or update release PR
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.merged == true &&
+       github.event.pull_request.head.ref != 'release/next' &&
+       !contains(github.event.pull_request.labels.*.name, 'release:skip'))
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
-    # Never react to this workflow's own push. GitHub creates a run for it and
-    # parks it as `action_required`; approving that run by hand would make the
-    # job unwind and rewrite the commit it had just written, for no change.
-    #
-    # A fork's branch cannot be pushed to with GITHUB_TOKEN either. Those pull
-    # requests get their version set by a maintainer after the merge, or by
-    # relabelling once the branch is in this repository.
-    if: >-
-      github.actor != 'github-actions[bot]' &&
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      !contains(github.event.pull_request.labels.*.name, 'release:skip')
-
     permissions:
+      actions: write
       contents: write
+      pull-requests: write
 
     steps:
+      # pull_request_target has a write-capable token. Only trusted code from
+      # main is checked out; the merged pull request's head is never executed.
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.pull_request.head.ref }}
+          ref: main
           fetch-depth: 0
 
       - uses: actions/setup-node@v7
         with:
           node-version: 22
 
-      # Every comparison below is against `main`. Fetch it explicitly rather
-      # than relying on checkout having left a usable remote-tracking ref.
-      - name: Fetch main
-        run: git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
-
-      # Drop the previous run's bump before recomputing. Without this,
-      # relabelling stacks a second bump commit on top of the first and leaves
-      # the CHANGELOG heading naming the version that is no longer being
-      # released. Only ever unwinds this workflow's own commit — a human push
-      # on top makes HEAD something else, and nothing is touched.
-      - name: Unwind the previous bump
-        id: unwind
+      - name: Verify the release baseline
+        id: baseline
         run: |
-          if [ "$(git log -1 --format=%an)" = "github-actions[bot]" ]; then
-            case "$(git log -1 --format=%s)" in
-              ":bookmark: Bump version to "*)
-                echo "Dropping $(git log -1 --format=%s) to recompute from scratch."
-                git reset --hard HEAD~1
-                echo "unwound=true" >> "$GITHUB_OUTPUT"
-                ;;
-            esac
+          BASE_TAG="$(git describe --tags --abbrev=0 --match 'v[0-9]*')"
+          TAG_VERSION="${BASE_TAG#v}"
+          MAIN_VERSION="$(node -p "require('./package.json').version")"
+
+          if [ "$MAIN_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::main is version $MAIN_VERSION but the latest tag is $BASE_TAG. Finish or repair that release before preparing another one."
+            exit 1
           fi
 
-      - name: Work out the target version
-        id: target
+          echo "base_tag=$BASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "main_version=$MAIN_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Collect merged release decisions
+        id: decision
         env:
-          LABELS: ${{ join(github.event.pull_request.labels.*.name, ' ') }}
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_BASE_BRANCH: main
+          RELEASE_BASE_TAG: ${{ steps.baseline.outputs.base_tag }}
+        run: node scripts/collect-release-decision.mjs
+
+      - name: Build the release commit
+        id: release
+        if: steps.decision.outputs.bump != 'skip'
+        env:
+          BUMP: ${{ steps.decision.outputs.bump }}
         run: |
-          case " $LABELS " in
-            *" release:major "*) BUMP=major ;;
-            *" release:minor "*) BUMP=minor ;;
-            *) BUMP=patch ;;
-          esac
+          OLD_SHA="$(git ls-remote origin refs/heads/release/next | awk '{print $1}')"
 
-          BASE="$(git show origin/main:package.json \
-            | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).version")"
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git switch -C release/next origin/main
 
-          # Compute the target with npm's own semver rather than string
-          # arithmetic: reset to what `main` carries, then bump once.
-          npm pkg set "version=$BASE" > /dev/null
           npm version "$BUMP" --no-git-tag-version --allow-same-version > /dev/null
-
           TARGET="$(node -p "require('./package.json').version")"
-          echo "Labels: ${LABELS:-<none>} -> $BUMP. $BASE -> $TARGET."
-          echo "target=$TARGET" >> "$GITHUB_OUTPUT"
-
-      - name: Promote the CHANGELOG entry
-        env:
-          TARGET: ${{ steps.target.outputs.target }}
-        run: |
-          # Any `## [x.y.z]` heading that this branch has and `main` does not is
-          # one this workflow wrote earlier. If it names a different version —
-          # because the release label changed after the fact — say so loudly
-          # rather than silently leaving the CHANGELOG describing the wrong
-          # release.
-          ADDED="$(comm -13 \
-            <(git show origin/main:CHANGELOG.md | grep -o '^## \[[^]]*\]' | sort -u) \
-            <(grep -o '^## \[[^]]*\]' CHANGELOG.md | sort -u))"
-
-          if [ -n "$ADDED" ] && [ "$ADDED" != "## [$TARGET]" ]; then
-            echo "::warning::CHANGELOG.md has a section for $ADDED but this pull request now releases $TARGET. Rename that heading by hand."
-            exit 0
-          fi
-
-          if [ -n "$ADDED" ]; then
-            echo "CHANGELOG.md already has a section for $TARGET."
-            exit 0
-          fi
-
           echo "CHANGELOG: $(node scripts/release-changelog.mjs "$TARGET" "$(date -u +%Y-%m-%d)")"
 
-      - name: Commit the bump
-        env:
-          TARGET: ${{ steps.target.outputs.target }}
-          BRANCH: ${{ github.event.pull_request.head.ref }}
-          UNWOUND: ${{ steps.unwind.outputs.unwound }}
-        run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
           git add package.json CHANGELOG.md
+          git commit -m "chore(release): v$TARGET"
 
-          # Nothing staged means the recomputed result matches what is already
-          # on the branch, so the remote is left exactly as it is — including
-          # in the unwound case, where the commit that was dropped locally was
-          # already correct.
-          if git diff --cached --quiet; then
-            echo "Already set to $TARGET. Nothing to commit."
-            exit 0
+          if [ -n "$OLD_SHA" ]; then
+            git push --force-with-lease="refs/heads/release/next:$OLD_SHA" origin HEAD:release/next
+          else
+            git push origin HEAD:release/next
           fi
 
-          git commit -m ":bookmark: Bump version to $TARGET"
+          echo "target=$TARGET" >> "$GITHUB_OUTPUT"
 
-          # `--force-with-lease` only because the previous bump was unwound.
-          # It refuses if anyone pushed since this job fetched, so a
-          # contributor's work cannot be overwritten.
-          git push --force-with-lease origin "HEAD:$BRANCH"
+      - name: Open or refresh the release PR
+        if: steps.decision.outputs.bump != 'skip'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCES: ${{ steps.decision.outputs.sources }}
+          TARGET: ${{ steps.release.outputs.target }}
+        run: |
+          BODY="$RUNNER_TEMP/release-pr.md"
+          {
+            echo "Releases the merged changes below as **v$TARGET**."
+            echo
+            echo "## Included changes"
+            echo
+            printf '%s\n' "$SOURCES"
+            echo
+            echo "## Merge behavior"
+            echo
+            echo "Merging this pull request puts the version and CHANGELOG update on \`main\`. The Release workflow then verifies, publishes to npm, tags \`v$TARGET\`, and creates the GitHub Release."
+          } > "$BODY"
+
+          PR_NUMBER="$(gh pr list --state open --base main --head release/next --json number --jq '.[0].number // empty')"
+
+          if [ -z "$PR_NUMBER" ]; then
+            gh pr create \
+              --base main \
+              --head release/next \
+              --title "chore(release): v$TARGET" \
+              --body-file "$BODY" \
+              --label "release:skip"
+          else
+            gh pr edit "$PR_NUMBER" \
+              --title "chore(release): v$TARGET" \
+              --body-file "$BODY" \
+              --add-label "release:skip"
+          fi
+
+          # Pushes and pull requests created by GITHUB_TOKEN do not trigger
+          # ordinary workflows, so dispatch CI explicitly on the release SHA.
+          gh workflow run ci.yml --ref release/next

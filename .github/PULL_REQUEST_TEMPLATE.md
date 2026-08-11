@@ -18,6 +18,15 @@
 
 <!-- iOS or Android, Expo SDK version, macOS or Linux. -->
 
+## Release decision
+
+<!-- Select exactly one. See RELEASING.md for the label commands. -->
+
+- [ ] Patch — no `release:*` label
+- [ ] Minor — `release:minor`
+- [ ] Major — `release:major`
+- [ ] Skip npm release — `release:skip`
+
 ## Notes for reviewers
 
 <!-- Anything about cache invalidation, on-disk layout, or platform-specific

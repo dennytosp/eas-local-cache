@@ -2,11 +2,11 @@ name: Release
 
 # Publishes to npm when the version in package.json changes on `main`.
 #
-# The semver decision stays human: bump `package.json` in a pull request.
-# Merging that pull request is what releases. Everything after the merge —
+# Source pull request labels select semver after merge. The Prepare release
+# workflow puts that version in the dedicated `release/next` pull request.
+# Merging `release/next` is what releases. Everything after that merge —
 # publish, tag, GitHub Release — happens here. Pushes that do not change the
-# version are compared against the registry and skipped, so ordinary commits
-# never publish.
+# version are compared against the registry and skipped.
 #
 # Authentication uses npm trusted publishing (OIDC). There is no token to
 # store or rotate. Configure it once, at
