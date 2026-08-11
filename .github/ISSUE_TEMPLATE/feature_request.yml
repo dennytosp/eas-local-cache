@@ -1,0 +1,31 @@
+name: Feature request
+description: Suggest an improvement to the local build cache.
+labels: ["enhancement", "needs triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      placeholder: |
+        My .expo/cache grows without bound across branches and eventually fills
+        the disk; I would like old entries pruned.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behaviour
+      description: What should the plugin do, and what should it configure through `buildCacheProvider.options`?
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What have you tried already?
+
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: Contribution
+      options:
+        - label: I am willing to open a pull request for this.

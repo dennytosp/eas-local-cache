@@ -1,0 +1,95 @@
+name: Bug report
+description: A build was not cached, or a cached build was not reused.
+labels: ["bug", "needs triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Cache bugs are usually about *fingerprints* — two builds you expect to
+        match produce different hashes, or a stale artifact gets reused. The
+        Expo CLI output around "Searching for cached build with fingerprint"
+        is the most useful thing you can paste here.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      placeholder: |
+        Every `expo run:ios` rebuilds from scratch even though nothing changed,
+        and the log always says "Cache miss".
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Expo CLI output
+      description: Include the "Searching for cached build with fingerprint ..." lines.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Your buildCacheProvider config
+      description: The `experiments.buildCacheProvider` block from app.config.ts / app.json.
+      render: typescript
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: eas-local-cache version
+      placeholder: 1.0.3
+    validations:
+      required: true
+
+  - type: input
+    id: expo-version
+    attributes:
+      label: Expo SDK and Expo CLI version
+      placeholder: SDK 54, @expo/cli 0.24.x
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: macOS 15.1 (Apple Silicon)
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: platforms
+    attributes:
+      label: Platforms affected
+      options:
+        - label: iOS (.app bundle)
+        - label: Android (.apk)
+
+  - type: textarea
+    id: cache-dir
+    attributes:
+      label: Contents of .expo/cache
+      description: "Output of `ls -la .expo/cache` in your project root."
+      render: shell
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I tried clearing the cache (`rm -rf .expo/cache`) and reproducing again.
+          required: true
+        - label: I searched existing issues and did not find a duplicate.
+          required: true
