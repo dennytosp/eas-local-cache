@@ -1,8 +1,8 @@
-name: Prepare release
+name: Release merged changes
 
-# Source pull requests never receive version commits. After a pull request is
-# merged, this workflow aggregates every merged change since the latest v* tag
-# and creates or refreshes one protected-path release pull request.
+# A source pull request never receives a version commit. After it is merged,
+# trusted code from main selects the highest release label since the latest tag
+# and commits the version bump directly to main.
 
 on:
   pull_request_target:
@@ -14,24 +14,24 @@ permissions:
   contents: read
 
 concurrency:
-  group: prepare-release
+  group: release-main
   cancel-in-progress: false
 
 jobs:
   prepare:
-    name: Create or update release PR
+    name: Bump version on main
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.pull_request.merged == true &&
-       github.event.pull_request.head.ref != 'release/next' &&
        !contains(github.event.pull_request.labels.*.name, 'release:skip'))
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
     permissions:
-      actions: write
       contents: write
-      pull-requests: write
+
+    outputs:
+      release_sha: ${{ steps.release.outputs.sha }}
 
     steps:
       # pull_request_target has a write-capable token. Only trusted code from
@@ -45,6 +45,11 @@ jobs:
         with:
           node-version: 22
 
+      - name: Sync main
+        run: |
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          git switch -C main origin/main
+
       - name: Verify the release baseline
         id: baseline
         run: |
@@ -53,12 +58,11 @@ jobs:
           MAIN_VERSION="$(node -p "require('./package.json').version")"
 
           if [ "$MAIN_VERSION" != "$TAG_VERSION" ]; then
-            echo "::error::main is version $MAIN_VERSION but the latest tag is $BASE_TAG. Finish or repair that release before preparing another one."
+            echo "::error::main is version $MAIN_VERSION but the latest tag is $BASE_TAG. Repair that release with release.yml before bumping again."
             exit 1
           fi
 
           echo "base_tag=$BASE_TAG" >> "$GITHUB_OUTPUT"
-          echo "main_version=$MAIN_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Collect merged release decisions
         id: decision
@@ -68,70 +72,31 @@ jobs:
           RELEASE_BASE_TAG: ${{ steps.baseline.outputs.base_tag }}
         run: node scripts/collect-release-decision.mjs
 
-      - name: Build the release commit
+      - name: Commit the version bump to main
         id: release
         if: steps.decision.outputs.bump != 'skip'
         env:
           BUMP: ${{ steps.decision.outputs.bump }}
         run: |
-          OLD_SHA="$(git ls-remote origin refs/heads/release/next | awk '{print $1}')"
-
-          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
-          git switch -C release/next origin/main
-
           npm version "$BUMP" --no-git-tag-version --allow-same-version > /dev/null
           TARGET="$(node -p "require('./package.json').version")"
-          echo "CHANGELOG: $(node scripts/release-changelog.mjs "$TARGET" "$(date -u +%Y-%m-%d)")"
+          node scripts/release-changelog.mjs "$TARGET" "$(date -u +%Y-%m-%d)"
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add package.json CHANGELOG.md
           git commit -m "chore(release): v$TARGET"
+          git push origin HEAD:refs/heads/main
 
-          if [ -n "$OLD_SHA" ]; then
-            git push --force-with-lease="refs/heads/release/next:$OLD_SHA" origin HEAD:release/next
-          else
-            git push origin HEAD:release/next
-          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
-          echo "target=$TARGET" >> "$GITHUB_OUTPUT"
-
-      - name: Open or refresh the release PR
-        if: steps.decision.outputs.bump != 'skip'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SOURCES: ${{ steps.decision.outputs.sources }}
-          TARGET: ${{ steps.release.outputs.target }}
-        run: |
-          BODY="$RUNNER_TEMP/release-pr.md"
-          {
-            echo "Releases the merged changes below as **v$TARGET**."
-            echo
-            echo "## Included changes"
-            echo
-            printf '%s\n' "$SOURCES"
-            echo
-            echo "## Merge behavior"
-            echo
-            echo "Merging this pull request puts the version and CHANGELOG update on \`main\`. The Release workflow then verifies, publishes to npm, tags \`v$TARGET\`, and creates the GitHub Release."
-          } > "$BODY"
-
-          PR_NUMBER="$(gh pr list --state open --base main --head release/next --json number --jq '.[0].number // empty')"
-
-          if [ -z "$PR_NUMBER" ]; then
-            gh pr create \
-              --base main \
-              --head release/next \
-              --title "chore(release): v$TARGET" \
-              --body-file "$BODY" \
-              --label "release:skip"
-          else
-            gh pr edit "$PR_NUMBER" \
-              --title "chore(release): v$TARGET" \
-              --body-file "$BODY" \
-              --add-label "release:skip"
-          fi
-
-          # Pushes and pull requests created by GITHUB_TOKEN do not trigger
-          # ordinary workflows, so dispatch CI explicitly on the release SHA.
-          gh workflow run ci.yml --ref release/next
+  publish:
+    name: Publish the main release
+    needs: prepare
+    if: needs.prepare.outputs.release_sha != ''
+    permissions:
+      contents: write
+      id-token: write
+    uses: ./.github/workflows/release.yml
+    with:
+      ref: ${{ needs.prepare.outputs.release_sha }}
