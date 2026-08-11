@@ -1,9 +1,16 @@
 version: 2
 
-# Every Dependabot pull request carries `release:skip`. Merging one publishes
-# nothing on its own — dependency bumps here are development-only and do not
-# change the shipped plugin. Remove the label from a pull request that should
-# go out as a release.
+# Two pull requests per ecosystem at most, not one per dependency.
+#
+# Minor and patch updates travel together: they are routine, they either all
+# pass CI or the group tells you which one broke. Majors travel in a separate
+# group because that is where breaking changes live — TypeScript 7 removing
+# `moduleResolution=node10` should not be able to hold four harmless bumps
+# hostage in the same pull request.
+#
+# Every Dependabot pull request carries `release:skip`, so merging one never
+# publishes on its own. Remove the label from a pull request that should go
+# out as a release.
 
 updates:
   - package-ecosystem: npm
@@ -15,13 +22,12 @@ updates:
     commit-message:
       prefix: "chore(deps)"
     groups:
-      dev-dependencies:
-        dependency-type: development
-        # TypeScript majors remove compiler options outright, so they need a
-        # tsconfig migration rather than a routine merge. Keeping them out of
-        # the group means one red pull request instead of a red group that
-        # blocks the green bumps.
-        exclude-patterns: ["typescript"]
+      dependencies:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+      major-updates:
+        patterns: ["*"]
+        update-types: ["major"]
 
   - package-ecosystem: github-actions
     directory: /

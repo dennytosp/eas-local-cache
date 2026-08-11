@@ -7,22 +7,18 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 
-/**
- * The plugin resolves its cache directory from `process.cwd()` at module load
- * time, so we move into a throwaway project root *before* importing it.
- */
-const originalCwd = process.cwd();
 // realpath: on macOS os.tmpdir() is the /var -> /private/var symlink, and the
 // plugin reports the resolved path, so comparisons would otherwise disagree.
 const projectRoot = fs.realpathSync(
   fs.mkdtempSync(path.join(os.tmpdir(), "eas-local-cache-"))
 );
-process.chdir(projectRoot);
 
 const cacheDir = path.join(projectRoot, ".expo/cache");
 
-const mod = await import("../src/index");
-const plugin = mod.default;
+// Deliberately never chdir into projectRoot. The cache location has to come
+// from the projectRoot Expo passes in, and running the whole suite from an
+// unrelated working directory is what proves it does.
+import plugin from "../src/index";
 
 if (!("resolveBuildCache" in plugin) || !("uploadBuildCache" in plugin)) {
   throw new Error("Plugin must implement resolveBuildCache/uploadBuildCache");
@@ -31,7 +27,6 @@ if (!("resolveBuildCache" in plugin) || !("uploadBuildCache" in plugin)) {
 const { resolveBuildCache, uploadBuildCache } = plugin;
 
 afterAll(() => {
-  process.chdir(originalCwd);
   fs.rmSync(projectRoot, { recursive: true, force: true });
 });
 
@@ -189,5 +184,76 @@ describe("round trip", () => {
     );
 
     expect(resolved).toBe(uploaded);
+  });
+});
+
+describe("project root", () => {
+  it("caches into the projectRoot it is given, not the current directory", async () => {
+    const otherRoot = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), "eas-local-cache-other-"))
+    );
+    const buildPath = path.join(otherRoot, "Other.apk");
+    fs.writeFileSync(buildPath, "other");
+
+    try {
+      const cached = await uploadBuildCache(
+        {
+          projectRoot: otherRoot,
+          platform: "android",
+          fingerprintHash: "elsewhere",
+          buildPath,
+        } as UploadBuildCacheProps,
+        {}
+      );
+
+      expect(cached).toBe(
+        path.join(otherRoot, ".expo/cache", "android_elsewhere.apk")
+      );
+      expect(fs.existsSync(cached as string)).toBe(true);
+
+      // The default project root must not have been touched.
+      expect(fs.existsSync(path.join(cacheDir, "android_elsewhere.apk"))).toBe(
+        false
+      );
+
+      const resolved = await resolveBuildCache(
+        {
+          projectRoot: otherRoot,
+          platform: "android",
+          fingerprintHash: "elsewhere",
+        } as ResolveBuildCacheProps,
+        {}
+      );
+      expect(resolved).toBe(cached);
+    } finally {
+      fs.rmSync(otherRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("two project roots keep separate caches for the same fingerprint", async () => {
+    const secondRoot = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), "eas-local-cache-second-"))
+    );
+
+    try {
+      const first = await uploadBuildCache(
+        uploadProps("android", "shared", makeApk("First.apk")),
+        {}
+      );
+
+      const missInSecond = await resolveBuildCache(
+        {
+          projectRoot: secondRoot,
+          platform: "android",
+          fingerprintHash: "shared",
+        } as ResolveBuildCacheProps,
+        {}
+      );
+
+      expect(first).not.toBeNull();
+      expect(missInSecond).toBeNull();
+    } finally {
+      fs.rmSync(secondRoot, { recursive: true, force: true });
+    }
   });
 });

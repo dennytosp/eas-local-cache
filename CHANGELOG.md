@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- The cache directory was resolved from `process.cwd()` at module load instead
+  of from the `projectRoot` Expo passes in. Those differ whenever the CLI runs
+  from a subdirectory, from a monorepo root, or with `--project-root`, and the
+  result was a cache written somewhere the next build never looked — a silent
+  permanent cache miss rather than a visible error.
+
 ### Added
 
 - MIT `LICENSE` file (the package was already declared MIT in `package.json`).
