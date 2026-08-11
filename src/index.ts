@@ -8,28 +8,33 @@ import * as fs from "fs";
 import * as path from "path";
 
 /**
- * Local directory to store build cache files in project root
- */
-const CACHE_DIR = path.join(process.cwd(), ".expo/cache");
-
-/**
  * Ensures the cache directory exists
+ *
+ * The directory is derived from the projectRoot Expo passes in, not from
+ * process.cwd(). Those differ whenever the CLI is invoked from a subdirectory,
+ * from a monorepo root, or with --project-root, and caching into the wrong
+ * directory means silently never getting a cache hit.
  */
-const ensureCacheDir = () => {
-  if (!fs.existsSync(CACHE_DIR)) {
-    fs.mkdirSync(CACHE_DIR, { recursive: true });
+const ensureCacheDir = (projectRoot: string) => {
+  const cacheDir = path.join(projectRoot, ".expo/cache");
+  if (!fs.existsSync(cacheDir)) {
+    fs.mkdirSync(cacheDir, { recursive: true });
   }
-  return CACHE_DIR;
+  return cacheDir;
 };
 
 /**
  * Gets the cache file path for a specific build based on fingerprint and platform
  */
-const getCacheFilePath = (fingerprintHash: string, platform: string) => {
+const getCacheFilePath = (
+  projectRoot: string,
+  fingerprintHash: string,
+  platform: string
+) => {
   // For iOS, use .app extension, for Android use .apk
   const extension = platform === "ios" ? ".app" : ".apk";
   const filename = `${platform}_${fingerprintHash}${extension}`;
-  return path.join(ensureCacheDir(), filename);
+  return path.join(ensureCacheDir(projectRoot), filename);
 };
 
 /**
@@ -108,7 +113,11 @@ const plugin: BuildCacheProviderPlugin = {
       `Searching for cached build with fingerprint: ${fingerprintHash}`
     );
 
-    const cacheFilePath = getCacheFilePath(fingerprintHash, platform);
+    const cacheFilePath = getCacheFilePath(
+      projectRoot,
+      fingerprintHash,
+      platform
+    );
 
     if (verifyCacheFile(cacheFilePath, platform)) {
       console.log(
@@ -124,12 +133,16 @@ const plugin: BuildCacheProviderPlugin = {
   },
 
   uploadBuildCache: async (props: UploadBuildCacheProps, options) => {
-    const { fingerprintHash, platform, buildPath } = props;
+    const { fingerprintHash, platform, buildPath, projectRoot } = props;
     console.log(
       `Uploading build for ${platform} with fingerprint: ${fingerprintHash}`
     );
 
-    const cacheFilePath = getCacheFilePath(fingerprintHash, platform);
+    const cacheFilePath = getCacheFilePath(
+      projectRoot,
+      fingerprintHash,
+      platform
+    );
 
     try {
       // Check if build artifact exists
