@@ -1,7 +1,7 @@
 # Releasing
 
-Releases are selected with pull request labels. Pull request titles and commit
-messages do not determine the version.
+Releases are selected with pull request labels or an explicit package version
+increase. Pull request titles and commit messages do not determine the version.
 
 ## Release decisions
 
@@ -10,12 +10,14 @@ Choose exactly one release decision for every source pull request targeting
 
 | Decision | Pull request label | `1.2.3` becomes | Use for |
 | --- | --- | --- | --- |
-| Skip | No `release:*` label | Unchanged | Changes that must not publish a new npm version |
+| Skip | No label, version unchanged | Unchanged | Changes that must not publish a new npm version |
+| Exact | No label, version increased | Exact value | A manual stable-version release |
 | Patch | `release:patch` | `1.2.4` | Backwards-compatible fixes and small internal changes |
 | Minor | `release:minor` | `1.3.0` | Backwards-compatible provider behavior or options |
 | Major | `release:major` | `2.0.0` | Breaking cache-provider contract or behavior changes |
 
-Skip is the default. Publishing always requires an explicit release label.
+Skip is the default for changes that keep the current package version. An
+explicit version increase in `package.json` is the manual-release exception.
 
 Only one `release:*` label should be present. If conflicting labels are
 accidentally applied, the highest version wins: major, then minor, then patch.
@@ -103,11 +105,20 @@ gh pr view "$PR_NUMBER" \
 
 Interpret the output as follows:
 
-- `[]` means no npm release.
+- `[]` means no label-driven release; a higher package version still publishes
+  that exact version.
 - `["release:patch"]` means patch.
 - `["release:minor"]` means minor.
 - `["release:major"]` means major.
 - More than one value is a conflict; apply one of the commands above again.
+
+## Manual version bump
+
+To choose the exact next version yourself, update only the stable semantic
+version in `package.json`, for example `1.0.4` to `1.0.5`. No release label is
+required. Required CI rejects a version lower than the latest `v*` tag. After a
+higher version reaches `main` and its CI passes, automation publishes that
+exact version without applying another bump.
 
 ## What automation does
 
@@ -115,12 +126,14 @@ Source pull requests run format, lint, typecheck, test, build, and package
 checks without changing `package.json` or `CHANGELOG.md`. GitHub requires the
 CI checks to pass before the pull request can be merged into `main`.
 
-After the merged `main` commit passes CI, the release workflow examines every
-merged change since the latest `v*` tag. It uses the highest requested decision
-— major, then minor, then patch — and creates the version and CHANGELOG commit.
-That exact commit must pass required CI on a temporary release branch before it
-can fast-forward protected `main`. A stale CI run does nothing when a newer
-`main` commit is already being verified.
+After the merged `main` commit passes CI, a manually increased package version
+publishes as-is. When the package version still matches the latest `v*` tag,
+the release workflow instead examines every merged change since that tag. It
+uses the highest requested decision — major, then minor, then patch — and
+creates the version and CHANGELOG commit. That exact commit must pass required
+CI on a temporary release branch before it can fast-forward protected `main`.
+A stale CI run does nothing when a newer `main` commit is already being
+verified.
 
 The same workflow dispatches `release.yml` for that exact commit and waits for
 it to finish. The release repeats the quality checks, publishes to npm with
@@ -132,10 +145,11 @@ twice, but missing tags or GitHub Releases are still repaired.
 
 - Pull requests without a release label are ignored when the next version is
   selected.
-- Dependabot pull requests carry `release:patch`. Remove it when a dependency
-  change must not publish.
-- If the version on `main` differs from the latest `v*` tag, release
-  preparation stops instead of bumping again. Repair the interrupted release
-  with `gh workflow run release.yml`; if unreleased merged changes remain, run
-  `gh workflow run bump.yml` afterward.
+- Dependabot pull requests have no release label and therefore do not publish
+  by default. Add an explicit release label before merge only when the
+  dependency update must produce a new package version.
+- A package version higher than the latest `v*` tag is an explicit manual
+  release. A lower version fails required CI and cannot enter protected `main`.
+- Repair an interrupted publish, tag, or GitHub Release with
+  `gh workflow run release.yml`.
 - npm publishing requires the configured trusted publisher for `release.yml`.

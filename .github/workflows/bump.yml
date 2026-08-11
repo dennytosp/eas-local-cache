@@ -1,8 +1,9 @@
 name: Release merged changes
 
-# A source pull request never receives a version commit. CI verifies the merged
-# main commit first; only then does trusted code select the highest release
-# label since the latest tag and commit the version bump directly to main.
+# A source pull request never receives an automatic version commit. CI verifies
+# the merged main commit first. A manually increased package version publishes
+# as-is; otherwise trusted code selects the highest release label since the
+# latest tag and commits the version bump directly to main.
 
 on:
   workflow_run:
@@ -67,18 +68,13 @@ jobs:
         run: |
           BASE_TAG="$(git describe --tags --abbrev=0 --match 'v[0-9]*')"
           TAG_VERSION="${BASE_TAG#v}"
-          MAIN_VERSION="$(node -p "require('./package.json').version")"
-
-          if [ "$MAIN_VERSION" != "$TAG_VERSION" ]; then
-            echo "::error::main is version $MAIN_VERSION but the latest tag is $BASE_TAG. Repair that release with release.yml before bumping again."
-            exit 1
-          fi
-
+          RELEASED_VERSION="$TAG_VERSION" node scripts/check-release-version.mjs
           echo "base_tag=$BASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "release_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Collect merged release decisions
         id: decision
-        if: steps.current.outputs.ready == 'true'
+        if: steps.current.outputs.ready == 'true' && steps.baseline.outputs.status == 'same'
         env:
           GITHUB_TOKEN: ${{ github.token }}
           RELEASE_BASE_BRANCH: main
@@ -87,7 +83,7 @@ jobs:
 
       - name: Create the version commit
         id: release
-        if: steps.current.outputs.ready == 'true' && steps.decision.outputs.bump != 'skip'
+        if: steps.current.outputs.ready == 'true' && steps.baseline.outputs.status == 'same' && steps.decision.outputs.bump != 'skip'
         env:
           BUMP: ${{ steps.decision.outputs.bump }}
         run: |
@@ -105,7 +101,7 @@ jobs:
 
       - name: Verify the version commit
         id: verification
-        if: steps.current.outputs.ready == 'true' && steps.decision.outputs.bump != 'skip'
+        if: steps.current.outputs.ready == 'true' && steps.baseline.outputs.status == 'same' && steps.decision.outputs.bump != 'skip'
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_SHA: ${{ steps.release.outputs.sha }}
@@ -150,7 +146,7 @@ jobs:
 
       - name: Push the verified version to main
         id: push
-        if: steps.current.outputs.ready == 'true' && steps.decision.outputs.bump != 'skip'
+        if: steps.current.outputs.ready == 'true' && steps.baseline.outputs.status == 'same' && steps.decision.outputs.bump != 'skip'
         env:
           RELEASE_BRANCH: ${{ steps.verification.outputs.branch }}
           RELEASE_SHA: ${{ steps.release.outputs.sha }}
@@ -171,11 +167,29 @@ jobs:
       # npm validates the workflow that starts a run. Dispatching release.yml
       # preserves its trusted-publisher identity; workflow_call would expose
       # bump.yml as the caller and fail npm authentication.
+      - name: Recheck the manual release head
+        id: manual
+        if: steps.baseline.outputs.status == 'ahead'
+        env:
+          RELEASE_SHA: ${{ steps.baseline.outputs.release_sha }}
+        run: |
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+
+          if [ "$RELEASE_SHA" != "$(git rev-parse origin/main)" ]; then
+            echo "::notice::main advanced before the manual release; its newer CI run will publish the version."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
       - name: Dispatch and wait for the release
-        if: steps.push.outputs.pushed == 'true'
+        if: >-
+          (steps.baseline.outputs.status == 'ahead' && steps.manual.outputs.ready == 'true') ||
+          steps.push.outputs.pushed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+          RELEASE_SHA: ${{ steps.baseline.outputs.status == 'ahead' && steps.baseline.outputs.release_sha || steps.release.outputs.sha }}
         run: |
           RUN_TITLE="Release $RELEASE_SHA ($GITHUB_RUN_ID)"
           gh workflow run release.yml \

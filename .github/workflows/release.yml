@@ -37,6 +37,12 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
+
+      - name: Guard package version
+        run: |
+          BASE_TAG="$(git describe --tags --abbrev=0 --match 'v[0-9]*')"
+          RELEASED_VERSION="${BASE_TAG#v}" node scripts/check-release-version.mjs
 
       - id: check
         run: |
