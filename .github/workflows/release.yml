@@ -1,4 +1,5 @@
 name: Release
+run-name: Release ${{ inputs.ref || github.sha }} (${{ inputs.request_id || 'manual' }})
 
 # The post-merge workflow dispatches this file with the exact version-bump commit.
 # Manual dispatch remains available to repair an interrupted npm publish, tag,
@@ -9,6 +10,10 @@ on:
     inputs:
       ref:
         description: Commit containing the version to release
+        required: false
+        type: string
+      request_id:
+        description: Release preparation run that requested this release
         required: false
         type: string
   push:
@@ -107,6 +112,14 @@ jobs:
       - name: Install dependencies
         if: needs.check.outputs.publish == 'true'
         run: bun install
+
+      - name: Format
+        if: needs.check.outputs.publish == 'true'
+        run: bun run format:check
+
+      - name: Lint
+        if: needs.check.outputs.publish == 'true'
+        run: bun run lint
 
       - name: Typecheck
         if: needs.check.outputs.publish == 'true'

@@ -11,6 +11,8 @@
 
 ## How was this verified?
 
+- [ ] `bun run format:check` passes
+- [ ] `bun run lint` passes
 - [ ] `bun run typecheck` passes
 - [ ] `bun test` passes
 - [ ] `bun run build` passes
@@ -22,10 +24,10 @@
 
 <!-- Select exactly one. See RELEASING.md for the label commands. -->
 
-- [ ] Patch — no `release:*` label
+- [ ] Skip npm release — no `release:*` label
+- [ ] Patch — `release:patch`
 - [ ] Minor — `release:minor`
 - [ ] Major — `release:major`
-- [ ] Skip npm release — `release:skip`
 
 ## Notes for reviewers
 

@@ -9,10 +9,10 @@ const BUMPS = ["skip", "patch", "minor", "major"];
 export function classifyRelease(labels = []) {
   const names = new Set(labels.map((label) => label.name ?? label));
 
-  if (names.has("release:skip")) return "skip";
   if (names.has("release:major")) return "major";
   if (names.has("release:minor")) return "minor";
-  return "patch";
+  if (names.has("release:patch")) return "patch";
+  return "skip";
 }
 
 export function highestRelease(current, candidate) {
@@ -53,8 +53,9 @@ async function main() {
   const commits = [];
   for (let page = 1; ; page += 1) {
     const comparison = await request(
-      `/repos/${repository}/compare/${encodeURIComponent(baseTag)}...${encodeURIComponent(baseBranch)}` +
-        `?per_page=100&page=${page}`
+      `/repos/${repository}/compare/${encodeURIComponent(
+        baseTag
+      )}...${encodeURIComponent(baseBranch)}` + `?per_page=100&page=${page}`
     );
     commits.push(...comparison.commits);
     if (comparison.commits.length < 100) break;
@@ -72,7 +73,6 @@ async function main() {
     );
 
     if (mergedPulls.length === 0) {
-      bump = highestRelease(bump, "patch");
       continue;
     }
 
@@ -96,7 +96,10 @@ async function main() {
   );
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(process.argv[1]).href
+) {
   main().catch((error) => {
     console.error(error instanceof Error ? error.message : error);
     process.exit(1);
