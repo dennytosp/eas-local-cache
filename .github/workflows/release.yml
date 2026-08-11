@@ -1,27 +1,74 @@
 name: Release
 
-# Publishes to npm when a GitHub Release is published.
+# Publishes to npm when the version in package.json changes on `main`.
 #
-# One-time setup required before the first run:
-#   1. Create an npm automation token (npmjs.com -> Access Tokens).
-#   2. Add it as the repository secret `NPM_TOKEN`
-#      (Settings -> Secrets and variables -> Actions).
+# The semver decision stays human: bump `package.json` in a pull request.
+# Merging that pull request is what releases. Everything after the merge —
+# publish, tag, GitHub Release — happens here. Pushes that do not change the
+# version are compared against the registry and skipped, so ordinary commits
+# never publish.
+#
+# Authentication uses npm trusted publishing (OIDC). There is no token to
+# store or rotate. Configure it once, at
+# https://www.npmjs.com/package/eas-local-cache/access
+# -> Trusted Publisher:
+#
+#   Organization or user:  dennytosp
+#   Repository:            eas-local-cache
+#   Workflow filename:     release.yml
+#   Environment name:      (leave blank)
+#
+# Until a trusted publisher is configured, the workflow falls back to an
+# `NPM_TOKEN` repository secret if one exists.
 
 on:
-  release:
-    types: [published]
+  push:
+    branches: [main]
+    paths: ["package.json"]
   workflow_dispatch:
 
 permissions:
-  contents: read
-  id-token: write
+  contents: write # push the version tag and create the GitHub Release
+  id-token: write # OIDC for trusted publishing and provenance
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
-  publish:
-    name: Publish to npm
+  check:
+    name: Check for an unpublished version
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    environment: npm
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      publish: ${{ steps.check.outputs.publish }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - id: check
+        run: |
+          NAME="$(node -p "require('./package.json').name")"
+          VERSION="$(node -p "require('./package.json').version")"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+          # `npm view pkg@version` exits non-zero when that exact version is
+          # not on the registry — which is precisely the case worth publishing.
+          if npm view "$NAME@$VERSION" version > /dev/null 2>&1; then
+            echo "$NAME@$VERSION is already on npm. Nothing to release."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "$NAME@$VERSION is not on npm. Releasing."
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  release:
+    name: Publish v${{ needs.check.outputs.version }}
+    needs: check
+    if: needs.check.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v5
@@ -35,6 +82,11 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
+      # Trusted publishing needs npm 11.5.1 or newer. The npm bundled with
+      # Node 22 predates it.
+      - name: Use an npm that supports trusted publishing
+        run: npm install --global npm@latest
+
       - name: Install dependencies
         run: bun install
 
@@ -47,17 +99,31 @@ jobs:
       - name: Build
         run: bun run build
 
-      - name: Check release tag matches package version
-        if: github.event_name == 'release'
-        run: |
-          PKG_VERSION="$(node -p "require('./package.json').version")"
-          TAG="${GITHUB_REF_NAME#v}"
-          if [ "$PKG_VERSION" != "$TAG" ]; then
-            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $PKG_VERSION"
-            exit 1
-          fi
-
-      - name: Publish
+      # Publishing comes before tagging on purpose: a failed publish should not
+      # leave a tag claiming a release that does not exist.
+      - name: Publish to npm
         run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Tag and create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          git tag "v$VERSION"
+          git push origin "v$VERSION"
+
+          # Prefer the matching CHANGELOG section; fall back to generated notes
+          # when this version has no entry.
+          awk -v header="## [$VERSION]" '
+            index($0, header) == 1 { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > release-notes.md
+
+          if [ -s release-notes.md ] && grep -q '[^[:space:]]' release-notes.md; then
+            gh release create "v$VERSION" --title "v$VERSION" --notes-file release-notes.md
+          else
+            gh release create "v$VERSION" --title "v$VERSION" --generate-notes
+          fi

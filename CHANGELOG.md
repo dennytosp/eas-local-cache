@@ -14,7 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   build, and package verification on every push and pull request.
 - Integration tests covering cache miss, `.apk` file caching, `.app` bundle
   caching, overwrite, and round-trip resolve.
-- Release workflow that publishes to npm with provenance from a GitHub Release.
+- Release workflow: bumping the version in `package.json` and merging to `main`
+  publishes to npm with provenance, pushes the `v<version>` tag, and opens a
+  GitHub Release from this file. Pushes that do not change the version are
+  skipped.
 - `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`, issue and pull request
   templates, and Dependabot configuration.
 

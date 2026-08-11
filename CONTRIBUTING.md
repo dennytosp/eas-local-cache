@@ -106,15 +106,31 @@ Commit messages use a gitmoji + short summary style
 
 ## Releasing
 
-Maintainers only.
+Maintainers only. Merging a version bump into `main` is what releases —
+there is no separate publish step to remember.
 
-1. Update `CHANGELOG.md`, moving `Unreleased` entries under the new version.
-2. Bump the version in `package.json`.
-3. Merge to `main` and confirm CI is green.
-4. Create a GitHub Release with the tag `v<version>` (e.g. `v1.1.0`).
-5. The [Release workflow](./.github/workflows/release.yml) verifies the tag
-   matches `package.json`, re-runs the checks, and publishes to npm with
-   provenance.
+1. In a pull request: move the `Unreleased` entries in `CHANGELOG.md` under the
+   new version, and bump `package.json`.
+
+   ```bash
+   npm version minor --no-git-tag-version   # or patch / major
+   ```
+
+   `--no-git-tag-version` matters: the tag is created by CI after a successful
+   publish, so it never points at a release that failed halfway.
+
+2. Merge the pull request.
+
+The [Release workflow](./.github/workflows/release.yml) then compares
+`package.json` against the registry. If that version is already on npm it stops;
+otherwise it re-runs typecheck, tests and build on Ubuntu, publishes with
+provenance, pushes the `v<version>` tag, and opens a GitHub Release using the
+matching `CHANGELOG.md` section.
+
+Choosing the version number stays a human decision — nothing infers semver from
+commit messages. The plugin's public surface is the `BuildCacheProviderPlugin`
+contract, so a change to what `resolveBuildCache` returns, or to the cache key
+layout, is breaking even though the file is small.
 
 ## Questions
 
