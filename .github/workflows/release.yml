@@ -16,9 +16,6 @@ on:
         description: Release preparation run that requested this release
         required: false
         type: string
-  push:
-    branches: [main]
-    paths: ["package.json"]
 
 permissions:
   contents: read
