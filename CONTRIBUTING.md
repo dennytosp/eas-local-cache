@@ -107,10 +107,10 @@ Commit messages use a gitmoji + short summary style
 ## Releasing
 
 Source pull requests never bump their own version. After a merge into `main`,
-the default decision is patch when no `release:*` label is present; use
-`release:minor`, `release:major`, or `release:skip` to override it. Automation
-then commits the selected version directly to `main`, verifies the package,
-publishes it to npm, and creates the matching tag and GitHub Release.
+the default decision is to skip publishing when no `release:*` label is
+present. Use `release:patch`, `release:minor`, or `release:major` to publish.
+Automation then commits the selected version directly to `main`, verifies the
+package, publishes it to npm, and creates the matching tag and GitHub Release.
 
 Read [RELEASING.md](./RELEASING.md) for the complete rules and copy-pasteable
 `gh` commands for creating, applying, changing, and verifying release labels.

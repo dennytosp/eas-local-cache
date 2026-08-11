@@ -15,3 +15,4 @@ coverage
 .DS_Store
 
 *.lock
+!bun.lock

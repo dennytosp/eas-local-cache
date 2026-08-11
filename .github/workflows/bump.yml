@@ -1,13 +1,13 @@
 name: Release merged changes
 
-# A source pull request never receives a version commit. After it is merged,
-# trusted code from main selects the highest release label since the latest tag
-# and commits the version bump directly to main.
+# A source pull request never receives a version commit. CI verifies the merged
+# main commit first; only then does trusted code select the highest release
+# label since the latest tag and commit the version bump directly to main.
 
 on:
-  pull_request_target:
-    branches: [main]
-    types: [closed]
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
   workflow_dispatch:
 
 permissions:
@@ -22,18 +22,19 @@ jobs:
     name: Bump version on main
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      (github.event.pull_request.merged == true &&
-       !contains(github.event.pull_request.labels.*.name, 'release:skip'))
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
 
     permissions:
       actions: write
       contents: write
 
     steps:
-      # pull_request_target has a write-capable token. Only trusted code from
-      # main is checked out; the merged pull request's head is never executed.
+      # workflow_run uses the workflow from the default branch. Only trusted
+      # code from main is checked out; a pull request head is never executed.
       - uses: actions/checkout@v7
         with:
           ref: main
@@ -43,13 +44,26 @@ jobs:
         with:
           node-version: 22
 
-      - name: Sync main
+      - name: Select the current main commit
+        id: current
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          VERIFIED_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
           git switch -C main origin/main
 
+          if [ "$EVENT_NAME" = "workflow_run" ] && [ "$(git rev-parse HEAD)" != "$VERIFIED_SHA" ]; then
+            echo "::notice::A newer main commit already exists; its CI run will prepare the release."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
       - name: Verify the release baseline
         id: baseline
+        if: steps.current.outputs.ready == 'true'
         run: |
           BASE_TAG="$(git describe --tags --abbrev=0 --match 'v[0-9]*')"
           TAG_VERSION="${BASE_TAG#v}"
@@ -64,15 +78,16 @@ jobs:
 
       - name: Collect merged release decisions
         id: decision
+        if: steps.current.outputs.ready == 'true'
         env:
           GITHUB_TOKEN: ${{ github.token }}
           RELEASE_BASE_BRANCH: main
           RELEASE_BASE_TAG: ${{ steps.baseline.outputs.base_tag }}
         run: node scripts/collect-release-decision.mjs
 
-      - name: Commit the version bump to main
+      - name: Create the version commit
         id: release
-        if: steps.decision.outputs.bump != 'skip'
+        if: steps.current.outputs.ready == 'true' && steps.decision.outputs.bump != 'skip'
         env:
           BUMP: ${{ steps.decision.outputs.bump }}
         run: |
@@ -84,16 +99,112 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add package.json CHANGELOG.md
           git commit -m "chore(release): v$TARGET"
-          git push origin HEAD:refs/heads/main
 
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "version=$TARGET" >> "$GITHUB_OUTPUT"
+
+      - name: Verify the version commit
+        id: verification
+        if: steps.current.outputs.ready == 'true' && steps.decision.outputs.bump != 'skip'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+        run: |
+          RELEASE_BRANCH="release/verify-$GITHUB_RUN_ID"
+          git push origin "$RELEASE_SHA:refs/heads/$RELEASE_BRANCH"
+          cleanup() {
+            git push origin --delete "$RELEASE_BRANCH" > /dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          gh workflow run ci.yml --ref "$RELEASE_BRANCH"
+
+          CI_RUN_ID=""
+          for _ in $(seq 1 30); do
+            CI_RUN_ID="$(
+              gh run list \
+                --workflow ci.yml \
+                --event workflow_dispatch \
+                --branch "$RELEASE_BRANCH" \
+                --limit 10 \
+                --json databaseId,headSha \
+                --jq ".[] | select(.headSha == \"$RELEASE_SHA\") | .databaseId" \
+                | head -n 1
+            )"
+
+            if [ -n "$CI_RUN_ID" ]; then
+              break
+            fi
+
+            sleep 2
+          done
+
+          if [ -z "$CI_RUN_ID" ]; then
+            echo "::error::Could not find the version commit CI run."
+            exit 1
+          fi
+
+          gh run watch "$CI_RUN_ID" --exit-status
+          trap - EXIT
+          echo "branch=$RELEASE_BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: Push the verified version to main
+        id: push
+        if: steps.current.outputs.ready == 'true' && steps.decision.outputs.bump != 'skip'
+        env:
+          RELEASE_BRANCH: ${{ steps.verification.outputs.branch }}
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+        run: |
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+
+          if [ "$(git rev-parse "$RELEASE_SHA^")" != "$(git rev-parse origin/main)" ]; then
+            echo "::notice::main advanced while the version commit was being verified; the newer CI run will prepare the release."
+            git push origin --delete "$RELEASE_BRANCH"
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git push origin "$RELEASE_SHA:refs/heads/main"
+          git push origin --delete "$RELEASE_BRANCH"
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
 
       # npm validates the workflow that starts a run. Dispatching release.yml
       # preserves its trusted-publisher identity; workflow_call would expose
       # bump.yml as the caller and fail npm authentication.
-      - name: Dispatch the release
-        if: steps.decision.outputs.bump != 'skip'
+      - name: Dispatch and wait for the release
+        if: steps.push.outputs.pushed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_SHA: ${{ steps.release.outputs.sha }}
-        run: gh workflow run release.yml --ref main --field ref="$RELEASE_SHA"
+        run: |
+          RUN_TITLE="Release $RELEASE_SHA ($GITHUB_RUN_ID)"
+          gh workflow run release.yml \
+            --ref main \
+            --field ref="$RELEASE_SHA" \
+            --field request_id="$GITHUB_RUN_ID"
+
+          RELEASE_RUN_ID=""
+          for _ in $(seq 1 30); do
+            RELEASE_RUN_ID="$(
+              gh run list \
+                --workflow release.yml \
+                --event workflow_dispatch \
+                --limit 20 \
+                --json databaseId,displayTitle \
+                --jq ".[] | select(.displayTitle == \"$RUN_TITLE\") | .databaseId" \
+                | head -n 1
+            )"
+
+            if [ -n "$RELEASE_RUN_ID" ]; then
+              break
+            fi
+
+            sleep 2
+          done
+
+          if [ -z "$RELEASE_RUN_ID" ]; then
+            echo "::error::Could not find the dispatched release workflow run."
+            exit 1
+          fi
+
+          gh run watch "$RELEASE_RUN_ID" --exit-status

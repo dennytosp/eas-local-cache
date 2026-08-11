@@ -8,8 +8,8 @@ version: 2
 # `moduleResolution=node10` should not be able to hold four harmless bumps
 # hostage in the same pull request.
 #
-# Dependabot pull requests use the default patch release when they pass CI.
-# Add `release:skip` manually only when a dependency update must not publish.
+# Dependabot pull requests explicitly request a patch release. Remove the
+# `release:patch` label when a dependency update must not publish.
 
 updates:
   - package-ecosystem: npm
@@ -17,7 +17,7 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
-    labels: ["dependencies"]
+    labels: ["dependencies", "release:patch"]
     commit-message:
       prefix: "chore(deps)"
     groups:
@@ -32,7 +32,7 @@ updates:
     directory: /
     schedule:
       interval: weekly
-    labels: ["dependencies"]
+    labels: ["dependencies", "release:patch"]
     commit-message:
       prefix: "chore(ci)"
     groups:
