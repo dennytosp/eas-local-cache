@@ -14,10 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   build, and package verification on every push and pull request.
 - Integration tests covering cache miss, `.apk` file caching, `.app` bundle
   caching, overwrite, and round-trip resolve.
-- Release workflow: bumping the version in `package.json` and merging to `main`
+- Label-driven releases. A pull request labelled `release:minor` /
+  `release:major` (or left unlabelled, for a patch) gets its version and
+  CHANGELOG section written into the branch before merge; merging then
   publishes to npm with provenance, pushes the `v<version>` tag, and opens a
-  GitHub Release from this file. Pushes that do not change the version are
-  skipped.
+  GitHub Release from this file. `release:skip` publishes nothing.
 - `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`, issue and pull request
   templates, and Dependabot configuration.
 

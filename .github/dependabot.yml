@@ -1,20 +1,35 @@
 version: 2
 
+# Every Dependabot pull request carries `release:skip`. Merging one publishes
+# nothing on its own — dependency bumps here are development-only and do not
+# change the shipped plugin. Remove the label from a pull request that should
+# go out as a release.
+
 updates:
   - package-ecosystem: npm
     directory: /
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    labels: ["dependencies", "release:skip"]
     commit-message:
       prefix: "chore(deps)"
     groups:
       dev-dependencies:
         dependency-type: development
+        # TypeScript majors remove compiler options outright, so they need a
+        # tsconfig migration rather than a routine merge. Keeping them out of
+        # the group means one red pull request instead of a red group that
+        # blocks the green bumps.
+        exclude-patterns: ["typescript"]
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    labels: ["dependencies", "release:skip"]
     commit-message:
       prefix: "chore(ci)"
+    groups:
+      actions:
+        patterns: ["*"]

@@ -1,0 +1,133 @@
+name: Bump version
+
+# Writes the version a pull request will release into the pull request itself,
+# so the number is visible — and editable — before anyone merges.
+#
+#   release:skip    no bump; merging publishes nothing
+#   release:major   next major after the version on `main`
+#   release:minor   next minor
+#   (no label)      next patch
+#
+# The target is always computed from `main`, never from the pull request's own
+# package.json, so re-running this cannot make the version climb: label a pull
+# request minor, then major, then minor again, and it lands on the same number
+# it would have had the first time.
+#
+# The bump lives here rather than in the release workflow because `main`
+# requires a pull request, and the Actions bot cannot push to it. Merging the
+# pull request is what carries the bump commit onto `main`, through the front
+# door.
+#
+# Note: pushes made with GITHUB_TOKEN do not start new workflow runs, so CI
+# does not re-run on the bump commit. That commit only rewrites the version
+# field and moves a CHANGELOG heading — the code CI already verified is
+# byte-for-byte the same.
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bump-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  bump:
+    name: Set the release version
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    # A fork's branch cannot be pushed to with GITHUB_TOKEN. Those pull
+    # requests get their version set by a maintainer after the merge, or by
+    # relabelling once the branch is in this repository.
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      !contains(github.event.pull_request.labels.*.name, 'release:skip')
+
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      # Every comparison below is against `main`. Fetch it explicitly rather
+      # than relying on checkout having left a usable remote-tracking ref.
+      - name: Fetch main
+        run: git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+
+      - name: Work out the target version
+        id: target
+        env:
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ' ') }}
+        run: |
+          case " $LABELS " in
+            *" release:major "*) BUMP=major ;;
+            *" release:minor "*) BUMP=minor ;;
+            *) BUMP=patch ;;
+          esac
+
+          BASE="$(git show origin/main:package.json \
+            | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).version")"
+
+          # Compute the target with npm's own semver rather than string
+          # arithmetic: reset to what `main` carries, then bump once.
+          npm pkg set "version=$BASE" > /dev/null
+          npm version "$BUMP" --no-git-tag-version --allow-same-version > /dev/null
+
+          TARGET="$(node -p "require('./package.json').version")"
+          echo "Labels: ${LABELS:-<none>} -> $BUMP. $BASE -> $TARGET."
+          echo "target=$TARGET" >> "$GITHUB_OUTPUT"
+
+      - name: Promote the CHANGELOG entry
+        env:
+          TARGET: ${{ steps.target.outputs.target }}
+        run: |
+          # Any `## [x.y.z]` heading that this branch has and `main` does not is
+          # one this workflow wrote earlier. If it names a different version —
+          # because the release label changed after the fact — say so loudly
+          # rather than silently leaving the CHANGELOG describing the wrong
+          # release.
+          ADDED="$(comm -13 \
+            <(git show origin/main:CHANGELOG.md | grep -o '^## \[[^]]*\]' | sort -u) \
+            <(grep -o '^## \[[^]]*\]' CHANGELOG.md | sort -u))"
+
+          if [ -n "$ADDED" ] && [ "$ADDED" != "## [$TARGET]" ]; then
+            echo "::warning::CHANGELOG.md has a section for $ADDED but this pull request now releases $TARGET. Rename that heading by hand."
+            exit 0
+          fi
+
+          if [ -n "$ADDED" ]; then
+            echo "CHANGELOG.md already has a section for $TARGET."
+            exit 0
+          fi
+
+          echo "CHANGELOG: $(node scripts/release-changelog.mjs "$TARGET" "$(date -u +%Y-%m-%d)")"
+
+      - name: Commit the bump
+        env:
+          TARGET: ${{ steps.target.outputs.target }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add package.json CHANGELOG.md
+
+          if git diff --cached --quiet; then
+            echo "Already set to $TARGET. Nothing to commit."
+            exit 0
+          fi
+
+          git commit -m ":bookmark: Bump version to $TARGET"
+          git push origin "HEAD:$BRANCH"

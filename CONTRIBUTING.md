@@ -106,31 +106,47 @@ Commit messages use a gitmoji + short summary style
 
 ## Releasing
 
-Maintainers only. Merging a version bump into `main` is what releases —
-there is no separate publish step to remember.
+Merging a pull request into `main` is what releases. There is no separate
+publish step to remember, and no version number to type.
 
-1. In a pull request: move the `Unreleased` entries in `CHANGELOG.md` under the
-   new version, and bump `package.json`.
+**How the version is chosen.** Label the pull request:
 
-   ```bash
-   npm version minor --no-git-tag-version   # or patch / major
-   ```
+| Label | 1.2.3 becomes | Use for |
+| --- | --- | --- |
+| *(none)* | `1.2.4` | bug fixes, docs, internals |
+| `release:minor` | `1.3.0` | new behaviour that stays compatible |
+| `release:major` | `2.0.0` | anything that breaks existing setups |
+| `release:skip` | unchanged | nothing published at all |
 
-   `--no-git-tag-version` matters: the tag is created by CI after a successful
-   publish, so it never points at a release that failed halfway.
+The public surface here is the `BuildCacheProviderPlugin` contract, so a change
+to what `resolveBuildCache` returns, or to the cache key layout, is
+`release:major` even though the file is small — a changed key layout silently
+invalidates every cache entry a user already has.
 
-2. Merge the pull request.
+**What happens.** The [bump workflow](./.github/workflows/bump.yml) writes the
+new version and moves your `Unreleased` CHANGELOG entries under it, committing
+`:bookmark: Bump version to <version>` to the pull request branch. You see the
+exact number and notes before merging, and can edit them.
 
-The [Release workflow](./.github/workflows/release.yml) then compares
-`package.json` against the registry. If that version is already on npm it stops;
-otherwise it re-runs typecheck, tests and build on Ubuntu, publishes with
-provenance, pushes the `v<version>` tag, and opens a GitHub Release using the
-matching `CHANGELOG.md` section.
+Merging carries that commit onto `main`, where the
+[release workflow](./.github/workflows/release.yml) sees a version the registry
+does not have yet, re-runs typecheck/tests/build on Ubuntu, publishes with
+provenance, pushes the `v<version>` tag, and opens a GitHub Release from the
+CHANGELOG section.
 
-Choosing the version number stays a human decision — nothing infers semver from
-commit messages. The plugin's public surface is the `BuildCacheProviderPlugin`
-contract, so a change to what `resolveBuildCache` returns, or to the cache key
-layout, is breaking even though the file is small.
+The target is always computed from `main`, never from the branch, so
+re-labelling is safe: minor, then major, then minor again lands on the same
+number it would have the first time.
+
+**Two things worth knowing.**
+
+CI does not re-run on the bump commit — pushes made with `GITHUB_TOKEN` do not
+start workflow runs. That commit only rewrites the version field and moves a
+CHANGELOG heading; the code CI verified is unchanged.
+
+Pull requests from forks are not bumped, because the bot cannot push to a
+fork's branch. Release those by bumping by hand after the merge, or by moving
+the branch into this repository.
 
 ## Questions
 
