@@ -140,9 +140,13 @@ number it would have the first time.
 
 **Two things worth knowing.**
 
-CI does not re-run on the bump commit — pushes made with `GITHUB_TOKEN` do not
-start workflow runs. That commit only rewrites the version field and moves a
-CHANGELOG heading; the code CI verified is unchanged.
+CI does not re-run on the bump commit. GitHub creates a workflow run for a
+push made with `GITHUB_TOKEN` but parks it as *action required* with no jobs,
+so the pull request's head commit carries no green tick. That commit only
+rewrites the version field and moves a CHANGELOG heading; the code CI verified
+is unchanged. If you want the tick on the exact commit being merged, approve
+the parked **CI** run from the Actions tab — not the parked *Bump version* run,
+which would only rewrite the bump commit it had just made.
 
 Pull requests from forks are not bumped, because the bot cannot push to a
 fork's branch. Release those by bumping by hand after the merge, or by moving

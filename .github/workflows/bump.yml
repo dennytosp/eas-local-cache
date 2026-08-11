@@ -18,10 +18,12 @@ name: Bump version
 # pull request is what carries the bump commit onto `main`, through the front
 # door.
 #
-# Note: pushes made with GITHUB_TOKEN do not start new workflow runs, so CI
-# does not re-run on the bump commit. That commit only rewrites the version
-# field and moves a CHANGELOG heading — the code CI already verified is
-# byte-for-byte the same.
+# Note: GitHub does not run workflows for a push made with GITHUB_TOKEN. It
+# creates the run and parks it as `action_required` with no jobs, so CI does
+# not re-run on the bump commit. That commit only rewrites the version field
+# and moves a CHANGELOG heading — the code CI already verified is byte-for-byte
+# the same. If you want a green tick on the exact commit being merged, approve
+# the parked CI run from the Actions tab (approve CI, not this workflow).
 
 on:
   pull_request:
@@ -41,10 +43,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
-    # A fork's branch cannot be pushed to with GITHUB_TOKEN. Those pull
+    # Never react to this workflow's own push. GitHub creates a run for it and
+    # parks it as `action_required`; approving that run by hand would make the
+    # job unwind and rewrite the commit it had just written, for no change.
+    #
+    # A fork's branch cannot be pushed to with GITHUB_TOKEN either. Those pull
     # requests get their version set by a maintainer after the merge, or by
     # relabelling once the branch is in this repository.
     if: >-
+      github.actor != 'github-actions[bot]' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
       !contains(github.event.pull_request.labels.*.name, 'release:skip')
 
