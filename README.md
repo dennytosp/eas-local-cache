@@ -3,105 +3,180 @@
 [![CI](https://github.com/dennytosp/eas-local-cache/actions/workflows/ci.yml/badge.svg)](https://github.com/dennytosp/eas-local-cache/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/eas-local-cache.svg)](https://www.npmjs.com/package/eas-local-cache)
 [![npm downloads](https://img.shields.io/npm/dm/eas-local-cache.svg)](https://www.npmjs.com/package/eas-local-cache)
+[![TypeScript](https://img.shields.io/badge/types-included-blue.svg)](./src/index.ts)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](./CONTRIBUTING.md)
 
-## Introduction
+A lightweight build cache provider that makes repeated local Expo builds fast.
+When the project fingerprint has not changed, Expo reuses the cached native app
+instead of compiling it again.
 
-EAS Local Cache is a library designed to optimize build times by caching build artifacts locally. This allows subsequent builds with the same configuration to reuse previously built artifacts instead of rebuilding them from scratch.
+- **Fast local rebuilds** with fingerprint-based cache hits
+- **iOS and Android support** for `.app` bundles and `.apk` files
+- **Fully local storage** with no upload, account, or external service
+- **Project-scoped caching** that works from subdirectories and monorepos
+- **Typed TypeScript implementation** with no runtime changes to your app
+
+---
+
+https://github.com/user-attachments/assets/133b5ddf-9a9a-48a1-9697-ab40de0534a1
+
+---
+
+## Requirements
+
+- Node.js 18 or newer
+- An Expo project with a version of Expo CLI that supports
+  `buildCacheProvider`
+- Xcode for iOS Simulator builds or the Android SDK for Android builds
+
+This package only participates in local native builds. It is not imported by
+your application at runtime.
 
 ## Installation
 
-To install EAS Local Cache, select your preferred package manager:
-
-### npm
+Choose your preferred package manager:
 
 ```bash
+# npm
 npm install --save-dev eas-local-cache
+
+# yarn
+yarn add --dev eas-local-cache
+
+# pnpm
+pnpm add --save-dev eas-local-cache
+
+# bun
+bun add --dev eas-local-cache
 ```
 
-### bun
+## Quick Start
 
-```bash
-bun add eas-local-cache -D
-```
-
-Add the following configuration to your `app.config.ts`:
+Add the provider to your `app.config.ts`:
 
 ```typescript
-experiments: {
-  typedRoutes: true,
+import type { ConfigContext, ExpoConfig } from "expo/config";
+
+export default ({ config }: ConfigContext): ExpoConfig => ({
+  ...config,
   buildCacheProvider: {
-    plugin: 'eas-local-cache',
+    plugin: "eas-local-cache",
   },
+});
+```
+
+Or use `app.json`:
+
+```json
+{
+  "expo": {
+    "buildCacheProvider": {
+      "plugin": "eas-local-cache"
+    }
+  }
 }
 ```
 
+> [!IMPORTANT]
+> Use the top-level `buildCacheProvider` field. The older
+> `experiments.buildCacheProvider` field is deprecated in current Expo
+> releases.
+
+Run your app as usual:
+
+```bash
+npx expo run:ios
+# or
+npx expo run:android
+```
+
+The first run compiles the native app and stores its artifact. A later run with
+the same project fingerprint restores that artifact and launches it without
+recompiling.
+
 ## How It Works
 
-EAS Local Cache implements two main functions:
+1. Expo calculates a fingerprint from the native build inputs.
+2. `eas-local-cache` looks for the matching platform and fingerprint in
+   `<projectRoot>/.expo/cache`.
+3. On a cache hit, Expo installs and launches the stored artifact.
+4. On a cache miss, Expo builds normally and the successful artifact is saved
+   for the next run.
 
-1. **Resolving Build Cache**: Checks if a build with the same fingerprint already exists in the cache.
-2. **Uploading Build Cache**: Stores successful builds in the cache for future use.
-
-The system generates a unique fingerprint hash for each build configuration. If the exact same configuration is built again, the cached version will be used, significantly reducing build times.
-
-## Features
-
-- **Cross-Platform Support**: Works with both iOS and Android builds.
-- **Intelligent File Handling**: Properly handles both directory structures (iOS .app bundles) and single files (Android .apk).
-- **Reliable Copying**: Uses platform-specific copy mechanisms for maximum reliability.
+The cache is resolved from the project root supplied by Expo, not the current
+working directory. This keeps caches isolated when commands are run from a
+subdirectory, monorepo root, or with a custom project root.
 
 ## Cache Storage
 
-Build artifacts are stored in the `.expo/cache` directory at the project root.
+Artifacts are stored under `.expo/cache` in your project:
 
-Files are named according to the pattern:
+| Platform      | Artifact      | Cache name                      |
+| ------------- | ------------- | ------------------------------- |
+| iOS Simulator | `.app` bundle | `ios_<fingerprintHash>.app`     |
+| Android       | `.apk` file   | `android_<fingerprintHash>.apk` |
 
-- iOS: `ios_[fingerprintHash].app`
-- Android: `android_[fingerprintHash].apk`
+The directory is local to each project and should not be committed to source
+control.
 
-## Usage
+## Limitations
 
-EAS Local Cache is automatically used by Expo when building your application. No additional configuration is required.
+- The provider is used only by local `npx expo run:ios` and
+  `npx expo run:android` commands.
+- `eas build`, including `eas build --local`, does not invoke this provider.
+- Expo skips build cache providers for physical iOS device builds. Only iOS
+  Simulator builds participate in caching.
+- Cache artifacts stay on the current machine; this package does not share them
+  with teammates or CI runners.
 
-To clear the cache manually, you can delete the `.expo/cache` directory in your project root:
+## Troubleshooting
+
+### The build never hits the cache
+
+- Confirm `buildCacheProvider` is not nested under `experiments`.
+- Check that `.expo/cache` exists in the Expo project root.
+- Make sure the native build inputs have not changed. A changed fingerprint is
+  expected to produce a cache miss.
+- Look for `Cache hit` or `Cache miss` in the Expo CLI output.
+
+### Clear the local cache
+
+Delete the project cache and run the build again:
 
 ```bash
 rm -rf .expo/cache
 ```
 
-## Troubleshooting
+### A cached artifact is invalid
 
-If you're experiencing issues with cached builds:
-
-1. Check file permissions in the cache directory.
-2. Verify that the cache directory has sufficient disk space.
-3. Clear the cache directory and try again.
+Clear `.expo/cache` and rebuild. Also check that the project directory is
+writable and has enough available disk space.
 
 ## Contributing
 
-Contributions are welcome — bug reports, docs fixes, and cache-correctness fixes
-especially.
+Bug reports, documentation fixes, and cache-correctness improvements are
+welcome.
 
 ```bash
 git clone https://github.com/dennytosp/eas-local-cache.git
 cd eas-local-cache
 bun install
 
-bun run typecheck   # tsc --noEmit over src/ and test/
-bun test            # integration tests against a temporary project root
-bun run build       # tsc -> build/
+bun run typecheck
+bun test
+bun run build
 ```
 
-These three commands are exactly what CI runs on every pull request, on both
-Ubuntu and macOS. See [CONTRIBUTING.md](./CONTRIBUTING.md) for the full guide
-(including how to link the plugin into a real Expo app), and
+These are the core validation commands. CI also checks formatting, lint rules,
+the release version, and the published package contents on Ubuntu and macOS.
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for the full development guide and
 [CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md) for community expectations.
 
 - Found a bug? [Open an issue](https://github.com/dennytosp/eas-local-cache/issues/new?template=bug_report.yml)
 - Have a usage question? [Start a discussion](https://github.com/dennytosp/eas-local-cache/discussions)
-- Found a security problem? See [SECURITY.md](./SECURITY.md) — please do not open a public issue
+- Found a security issue? Read [SECURITY.md](./SECURITY.md) and please do not
+  open a public issue
 
 ## Changelog
 
