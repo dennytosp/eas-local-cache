@@ -1,27 +1,16 @@
 name: Release
 
-# Publishes to npm when the version in package.json changes on `main`.
-#
-# Source pull request labels select semver after merge. The Prepare release
-# workflow puts that version in the dedicated `release/next` pull request.
-# Merging `release/next` is what releases. Everything after that merge —
-# publish, tag, GitHub Release — happens here. Pushes that do not change the
-# version are compared against the registry and skipped.
-#
-# Authentication uses npm trusted publishing (OIDC). There is no token to
-# store or rotate. Configure it once, at
-# https://www.npmjs.com/package/eas-local-cache/access
-# -> Trusted Publisher:
-#
-#   Organization or user:  dennytosp
-#   Repository:            eas-local-cache
-#   Workflow filename:     release.yml
-#   Environment name:      (leave blank)
-#
-# Until a trusted publisher is configured, the workflow falls back to an
-# `NPM_TOKEN` repository secret if one exists.
+# The post-merge workflow calls this file with the exact version-bump commit.
+# Manual dispatch remains available to repair an interrupted npm publish, tag,
+# or GitHub Release without incrementing the version again.
 
 on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit containing the version to release
+        required: true
+        type: string
   push:
     branches: [main]
     paths: ["package.json"]
@@ -31,7 +20,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: release
+  group: publish
   cancel-in-progress: false
 
 jobs:
@@ -45,6 +34,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
 
       - id: check
         run: |
@@ -52,13 +43,6 @@ jobs:
           VERSION="$(node -p "require('./package.json').version")"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-          # Ask the registry once for every published version.
-          #
-          # `npm view pkg@version` exits non-zero both when the version is
-          # genuinely unpublished and when the registry is unreachable, so
-          # using it directly would read a network blip as "not released yet"
-          # and try to publish. Fetch the version list instead and tell the two
-          # cases apart explicitly.
           set +e
           VERSIONS="$(npm view "$NAME" versions --json 2>&1)"
           STATUS=$?
@@ -75,8 +59,6 @@ jobs:
             exit 1
           fi
 
-          # A package with a single published version returns a bare string
-          # rather than an array.
           if printf '%s' "$VERSIONS" | node -e '
             let raw = "";
             process.stdin.on("data", (chunk) => (raw += chunk));
@@ -86,7 +68,7 @@ jobs:
               process.exit(all.includes(process.argv[1]) ? 0 : 1);
             });
           ' "$VERSION"; then
-            echo "$NAME@$VERSION is already on npm. Nothing to release."
+            echo "$NAME@$VERSION is already on npm. Skipping publish."
             echo "publish=false" >> "$GITHUB_OUTPUT"
           else
             echo "$NAME@$VERSION is not on npm. Releasing."
@@ -94,51 +76,54 @@ jobs:
           fi
 
   release:
-    name: Publish v${{ needs.check.outputs.version }}
+    name: Release v${{ needs.check.outputs.version }}
     needs: check
-    if: needs.check.outputs.publish == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
     permissions:
-      contents: write # push the version tag and create the GitHub Release
-      id-token: write # OIDC for trusted publishing and provenance
+      contents: write
+      id-token: write
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
 
       - uses: oven-sh/setup-bun@v2
+        if: needs.check.outputs.publish == 'true'
         with:
           bun-version: latest
 
       - uses: actions/setup-node@v7
+        if: needs.check.outputs.publish == 'true'
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
-      # Trusted publishing needs npm 11.5.1 or newer. The npm bundled with
-      # Node 22 predates it.
       - name: Use an npm that supports trusted publishing
+        if: needs.check.outputs.publish == 'true'
         run: npm install --global npm@latest
 
       - name: Install dependencies
+        if: needs.check.outputs.publish == 'true'
         run: bun install
 
       - name: Typecheck
+        if: needs.check.outputs.publish == 'true'
         run: bun run typecheck
 
       - name: Test
+        if: needs.check.outputs.publish == 'true'
         run: bun test
 
       - name: Build
+        if: needs.check.outputs.publish == 'true'
         run: bun run build
 
-      # Publishing comes before tagging on purpose: a failed publish should not
-      # leave a tag claiming a release that does not exist.
       - name: Publish to npm
+        if: needs.check.outputs.publish == 'true'
         run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Tag and create the GitHub Release
         env:
@@ -147,8 +132,6 @@ jobs:
         run: |
           TAG="v$VERSION"
 
-          # npm is already published by this point, so a pre-existing tag or
-          # release is reported and stepped over rather than failing the run.
           if git ls-remote --exit-code --tags origin "refs/tags/$TAG" > /dev/null 2>&1; then
             echo "::notice::Tag $TAG already exists on the remote. Leaving it as is."
           else
@@ -161,8 +144,6 @@ jobs:
             exit 0
           fi
 
-          # Prefer the matching CHANGELOG section; fall back to generated notes
-          # when this version has no entry.
           NOTES="$RUNNER_TEMP/release-notes.md"
           awk -v header="## [$VERSION]" '
             index($0, header) == 1 { found = 1; next }

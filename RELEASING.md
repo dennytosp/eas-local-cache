@@ -117,29 +117,23 @@ Source pull requests run CI without changing `package.json` or `CHANGELOG.md`.
 The release decision is read only after a pull request has been merged into
 `main`.
 
-After a non-skipped merge, the Prepare release workflow examines every merged
-change since the latest `v*` tag. It uses the highest requested decision —
-major, then minor, then patch — and creates or refreshes a single
-`release/next` pull request from the latest `main`. That release pull request
-contains the version and CHANGELOG commit and carries `release:skip` so it
-cannot recursively prepare another release.
+After a non-skipped merge, the release workflow examines every merged change
+since the latest `v*` tag. It uses the highest requested decision — major,
+then minor, then patch — and commits the version and CHANGELOG update directly
+to `main`.
 
-The workflow dispatches CI explicitly on `release/next`. After those checks
-pass, merge the release pull request. Its merge is the first time the new
-version appears on `main`.
-
-The Release workflow then verifies the code, publishes to npm with provenance,
-tags `v<version>`, and creates the GitHub Release. An already-published version
-is skipped successfully.
+The same workflow then verifies that exact commit, publishes it to npm with
+provenance, tags `v<version>`, and creates the GitHub Release. There is no
+second release pull request to merge. An already-published version is not
+published twice, but missing tags or GitHub Releases are still repaired.
 
 ## Operational notes
 
 - `release:skip` pull requests are ignored when the next version is selected.
 - Dependency updates use patch by default. Add `release:skip` manually when a
   dependency change must not publish.
-- This repository currently requires a maintainer to merge `release/next`
-  after CI passes; repository auto-merge is disabled.
 - If the version on `main` differs from the latest `v*` tag, release
-  preparation stops instead of skipping over an incomplete publication.
-- npm publishing requires the configured trusted publisher or an `NPM_TOKEN`
-  repository secret.
+  preparation stops instead of bumping again. Repair the interrupted release
+  with `gh workflow run release.yml`; if unreleased merged changes remain, run
+  `gh workflow run bump.yml` afterward.
+- npm publishing requires the configured trusted publisher for `release.yml`.

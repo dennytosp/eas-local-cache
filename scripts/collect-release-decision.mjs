@@ -19,10 +19,6 @@ export function highestRelease(current, candidate) {
   return RANKS[candidate] > RANKS[current] ? candidate : current;
 }
 
-function cleanTitle(title) {
-  return title.replace(/\s+/g, " ").trim();
-}
-
 async function main() {
   const token = process.env.GITHUB_TOKEN;
   const repository = process.env.GITHUB_REPOSITORY;
@@ -65,7 +61,6 @@ async function main() {
   }
 
   let bump = "skip";
-  const sources = [];
   const seenPullRequests = new Set();
 
   for (const commit of commits) {
@@ -78,7 +73,6 @@ async function main() {
 
     if (mergedPulls.length === 0) {
       bump = highestRelease(bump, "patch");
-      sources.push(`- \`${commit.sha.slice(0, 7)}\` — direct commit (patch)`);
       continue;
     }
 
@@ -86,17 +80,8 @@ async function main() {
       if (seenPullRequests.has(pull.number)) continue;
       seenPullRequests.add(pull.number);
 
-      const decision =
-        pull.head?.ref === "release/next"
-          ? "skip"
-          : classifyRelease(pull.labels);
+      const decision = classifyRelease(pull.labels);
       bump = highestRelease(bump, decision);
-
-      if (decision !== "skip") {
-        sources.push(
-          `- #${pull.number} ${cleanTitle(pull.title)} (${decision})`
-        );
-      }
     }
   }
 
@@ -104,12 +89,7 @@ async function main() {
     throw new Error(`Unsupported release decision: ${bump}`);
   }
 
-  const delimiter = `release_sources_${Date.now()}`;
-  appendFileSync(
-    outputFile,
-    `bump=${bump}\n` +
-      `sources<<${delimiter}\n${sources.join("\n")}\n${delimiter}\n`
-  );
+  appendFileSync(outputFile, `bump=${bump}\n`);
 
   console.log(
     `Compared ${commits.length} commit(s) after ${baseTag}; decision: ${bump}.`
