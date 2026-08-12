@@ -1,0 +1,13 @@
+node_modules
+.expo
+dist
+ios
+android
+*.lock
+pnpm-lock.yaml
+yarn.lock
+package-lock.json
+bun.lockb
+expo-env.d.ts
+uniwind-types.d.ts
+.DS_Store

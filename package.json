@@ -1,17 +1,18 @@
 {
   "name": "eas-local-cache",
   "version": "1.0.4",
-  "description": "A custom build cache provider for Expo CLI. Uses local to store builds.",
+  "description": "An offline, self-healing build cache provider for local Expo CLI builds.",
   "main": "build/index.js",
   "types": "build/index.d.ts",
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
-    "format": "prettier --write \".github/**/*.{yml,yaml}\" \"scripts/**/*.{js,mjs}\" \"src/**/*.{ts,tsx}\" \"test/**/*.{js,mjs,ts,tsx}\" package.json",
-    "format:check": "prettier --check \".github/**/*.{yml,yaml}\" \"scripts/**/*.{js,mjs}\" \"src/**/*.{ts,tsx}\" \"test/**/*.{js,mjs,ts,tsx}\" package.json",
+    "format": "prettier --write \".github/**/*.{yml,yaml}\" \".agents/**/*.md\" \"docs/**/*.md\" \"scripts/**/*.{js,mjs}\" \"src/**/*.{ts,tsx}\" \"test/**/*.{js,mjs,ts,tsx}\" package.json",
+    "format:check": "prettier --check \".github/**/*.{yml,yaml}\" \".agents/**/*.md\" \"docs/**/*.md\" \"scripts/**/*.{js,mjs}\" \"src/**/*.{ts,tsx}\" \"test/**/*.{js,mjs,ts,tsx}\" package.json",
     "lint": "oxlint --deny-warnings src test",
     "typecheck": "tsc --noEmit -p tsconfig.test.json",
     "test": "bun test",
+    "example:check": "bun run build && bun run --cwd example check",
     "prepack": "bun run build"
   },
   "repository": {

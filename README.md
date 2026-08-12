@@ -15,6 +15,7 @@ instead of compiling it again.
 - **iOS and Android support** for `.app` bundles and `.apk` files
 - **Fully local storage** with no upload, account, or external service
 - **Project-scoped caching** that works from subdirectories and monorepos
+- **Atomic and self-healing entries** that reject partial or corrupted builds
 - **Typed TypeScript implementation** with no runtime changes to your app
 
 ---
@@ -98,11 +99,15 @@ recompiling.
 ## How It Works
 
 1. Expo calculates a fingerprint from the native build inputs.
-2. `eas-local-cache` looks for the matching platform and fingerprint in
-   `<projectRoot>/.expo/cache`.
+2. `eas-local-cache` derives a safe cache identity from the platform and
+   fingerprint, then validates the matching entry in `<projectRoot>/.expo/cache`.
 3. On a cache hit, Expo installs and launches the stored artifact.
-4. On a cache miss, Expo builds normally and the successful artifact is saved
-   for the next run.
+4. On a cache miss, Expo builds normally. The successful artifact is copied to
+   a staging entry, checksummed, and atomically published for the next run.
+
+Concurrent builds for the same fingerprint coordinate through a per-entry lock.
+Incomplete staging data is never used, and a versioned entry that fails its
+manifest or integrity checks is moved to quarantine and treated as a cache miss.
 
 The cache is resolved from the project root supplied by Expo, not the current
 working directory. This keeps caches isolated when commands are run from a
@@ -110,12 +115,20 @@ subdirectory, monorepo root, or with a custom project root.
 
 ## Cache Storage
 
-Artifacts are stored under `.expo/cache` in your project:
+Versioned artifacts are stored under `.expo/cache/eas-local-cache/v1`:
 
-| Platform      | Artifact      | Cache name                      |
-| ------------- | ------------- | ------------------------------- |
-| iOS Simulator | `.app` bundle | `ios_<fingerprintHash>.app`     |
-| Android       | `.apk` file   | `android_<fingerprintHash>.apk` |
+| Path          | Purpose                                       |
+| ------------- | --------------------------------------------- |
+| `entries/`    | Immutable platform artifacts and manifests    |
+| `staging/`    | Incomplete uploads, never used for cache hits |
+| `locks/`      | Per-entry writer coordination                 |
+| `quarantine/` | Invalid entries retained for diagnosis        |
+
+Each entry contains `artifact.app` or `artifact.apk` plus `manifest.json`. The
+directory name is a SHA-256 cache identity, so fingerprint values never become
+raw filesystem paths. Flat `ios_<fingerprint>.app` and
+`android_<fingerprint>.apk` entries created by earlier releases remain readable
+for backward compatibility but are reported as unverified legacy entries.
 
 The directory is local to each project and should not be committed to source
 control.
@@ -150,8 +163,26 @@ rm -rf .expo/cache
 
 ### A cached artifact is invalid
 
-Clear `.expo/cache` and rebuild. Also check that the project directory is
+Versioned artifacts are verified before every cache hit. Invalid entries are
+quarantined automatically and Expo continues with a normal rebuild. If the
+problem repeats, clear `.expo/cache` and check that the project directory is
 writable and has enough available disk space.
+
+## Example App
+
+The [`example`](./example) Expo app uses HeroUI Native and Uniwind and links the
+current checkout through a local package dependency. It is the end-to-end
+fixture for verifying a real miss, upload, and subsequent hit:
+
+```bash
+bun run build
+bun install --cwd example
+bun run --cwd example ios
+bun run --cwd example ios
+```
+
+Use an iOS Simulator, or replace `ios` with `android` after starting an
+Android emulator. Run `bun run example:check` for the static integration checks.
 
 ## Contributing
 

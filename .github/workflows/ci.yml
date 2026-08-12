@@ -23,7 +23,7 @@ jobs:
       fail-fast: false
       matrix:
         # macOS matters here: the plugin prefers `ditto` for copying .app
-        # bundles and falls back to `cp -R` elsewhere. Both paths get exercised.
+        # bundles and uses Node's recursive copy elsewhere. Both paths run here.
         os: [ubuntu-latest, macos-latest]
 
     steps:
@@ -43,6 +43,9 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Install example dependencies
+        run: bun install --cwd example --frozen-lockfile
+
       - name: Format
         run: bun run format:check
 
@@ -57,6 +60,9 @@ jobs:
 
       - name: Build
         run: bun run build
+
+      - name: Verify example integration
+        run: bun run --cwd example check
 
       - name: Verify published files
         run: |
