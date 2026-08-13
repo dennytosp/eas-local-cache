@@ -23,7 +23,8 @@ committing. Native changes must also be exercised through the app under
 `example/` whenever the required simulator or emulator is available.
 
 Design specs under `docs/superpowers/specs/` are local working artifacts. Never
-stage or commit a new spec, and do not modify an already tracked historical spec.
+stage or commit anything from this directory; remove any historically tracked
+spec from Git while preserving its local file when practical.
 
 ## Project Boundaries
 
