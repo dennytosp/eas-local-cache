@@ -5,9 +5,11 @@ import * as path from "path";
 
 import {
   DEFAULT_CACHE_POLICY,
+  DEFAULT_COMPRESSION_OPTIONS,
   DEFAULT_ENVIRONMENT_OPTIONS,
   formatSizeBytes,
   normalizeCacheOptions,
+  normalizeCompressionOptions,
   normalizeEnvironmentOptions,
   parseSizeBytes,
 } from "../src/cache/options";
@@ -172,6 +174,19 @@ describe("cache provider options", () => {
     expect(formatSizeBytes(1536)).toBe("1.5KB");
     expect(formatSizeBytes(20 * 1024 ** 3)).toBe("20GB");
     expect(() => formatSizeBytes(-1)).toThrow();
+  });
+
+  it("keeps compression opt-in and validates its bounded mode", () => {
+    expect(normalizeCompressionOptions()).toEqual({ compressionMode: "off" });
+    expect(normalizeCompressionOptions({ compression: "zstd" })).toEqual({
+      compressionMode: "zstd",
+    });
+    expect(Object.isFrozen(DEFAULT_COMPRESSION_OPTIONS)).toBe(true);
+    const invalid = { compression: "gzip" } as never;
+    expect(() => normalizeCompressionOptions(invalid)).toThrow(
+      'compression must be "off" or "zstd"'
+    );
+    expect(() => normalizeCacheOptions(invalid)).toThrow();
   });
 });
 

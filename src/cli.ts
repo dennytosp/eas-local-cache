@@ -5,7 +5,7 @@ import * as path from "path";
 
 import { inventoryCache } from "./cache/catalog";
 import { pruneCache } from "./cache/cleanup";
-import { doctorCache } from "./cache/doctor";
+import { doctorCache, doctorCacheDeep } from "./cache/doctor";
 import { scanResolveEvents, summarizeResolveEvents } from "./cache/events";
 import {
   formatSizeBytes,
@@ -19,6 +19,7 @@ type ParsedArguments = {
   projectRoot: string;
   json: boolean;
   dryRun: boolean;
+  deep: boolean;
   platform: "android" | "ios" | null;
   overrides: CacheProviderOptions;
 };
@@ -30,7 +31,7 @@ const HELP = `eas-local-cache — inspect and maintain the local Expo build cach
 Usage:
   eas-local-cache stats [--project-root PATH] [--json]
   eas-local-cache list [--project-root PATH] [--platform ios|android] [--json]
-  eas-local-cache doctor [--project-root PATH] [--json]
+  eas-local-cache doctor [--project-root PATH] [--deep] [--json]
   eas-local-cache prune [--project-root PATH] [--dry-run] [--json]
                          [--max-size SIZE] [--max-entries COUNT]
                          [--retention-days DAYS]
@@ -64,6 +65,7 @@ export const parseCliArguments = (
     projectRoot: cwd,
     json: false,
     dryRun: false,
+    deep: false,
     platform: null,
     overrides: {},
   };
@@ -74,6 +76,8 @@ export const parseCliArguments = (
       parsed.json = true;
     } else if (option === "--dry-run") {
       parsed.dryRun = true;
+    } else if (option === "--deep") {
+      parsed.deep = true;
     } else if (option === "--project-root") {
       parsed.projectRoot = path.resolve(
         cwd,
@@ -111,6 +115,9 @@ export const parseCliArguments = (
   if (parsed.command !== "list" && parsed.platform) {
     throw new UsageError("--platform is only valid with list");
   }
+  if (parsed.command !== "doctor" && parsed.deep) {
+    throw new UsageError("--deep is only valid with doctor");
+  }
   if (
     parsed.command !== "prune" &&
     Object.values(parsed.overrides).some((value) => value !== undefined)
@@ -136,6 +143,23 @@ const formatDuration = (milliseconds: number): string => {
       : []),
   ].join(" ");
 };
+
+const checkedSum = (values: Iterable<number>, label: string): number => {
+  let total = 0;
+  for (const value of values) {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new Error(`${label} contains an invalid byte count`);
+    }
+    total += value;
+    if (!Number.isSafeInteger(total)) {
+      throw new Error(`${label} exceeds the supported byte range`);
+    }
+  }
+  return total;
+};
+
+const formatSignedSize = (bytes: number): string =>
+  bytes < 0 ? `-${formatSizeBytes(Math.abs(bytes))}` : formatSizeBytes(bytes);
 
 export const runCli = async (arguments_: string[]): Promise<number> => {
   try {
@@ -164,6 +188,12 @@ export const runCli = async (arguments_: string[]): Promise<number> => {
           createdAt: entry.createdAt,
           lastAccessedAt: entry.lastAccessedAt,
           protectedUntil: entry.protectedUntil,
+          encoding: entry.encoding,
+          logicalArtifactBytes: entry.logicalArtifactBytes,
+          payloadBytes: entry.payloadBytes,
+          compressionRatio: entry.compressionRatio,
+          grossCompressionSavedBytes: entry.grossCompressionSavedBytes,
+          restoreBytes: entry.restoreBytes,
         }));
       const legacyEntries = catalog.legacyEntries.filter(
         (entry) => !parsed.platform || entry.platform === parsed.platform
@@ -181,8 +211,21 @@ export const runCli = async (arguments_: string[]): Promise<number> => {
           console.log(
             `${entry.platform.padEnd(7)} ${entry.fingerprint} ${formatSizeBytes(
               entry.sizeBytes
-            ).padStart(9)} last used ${entry.lastAccessedAt}`
+            ).padStart(9)} ${entry.encoding.padEnd(4)} last used ${
+              entry.lastAccessedAt
+            }`
           );
+          if (entry.encoding === "zstd") {
+            console.log(
+              `         logical ${formatSizeBytes(
+                entry.logicalArtifactBytes
+              )}, payload ${formatSizeBytes(entry.payloadBytes ?? 0)}, ratio ${(
+                (entry.compressionRatio ?? 0) * 100
+              ).toFixed(1)}%, gross saved ${formatSizeBytes(
+                entry.grossCompressionSavedBytes
+              )}, restore ${formatSizeBytes(entry.restoreBytes)}`
+            );
+          }
         }
         for (const entry of legacyEntries) {
           console.log(
@@ -209,6 +252,10 @@ export const runCli = async (arguments_: string[]): Promise<number> => {
       } catch {
         telemetry = summarizeResolveEvents([]);
       }
+      const grossSavedBytes = checkedSum(
+        catalog.entries.map((entry) => entry.grossCompressionSavedBytes),
+        "Compression savings"
+      );
       const output = {
         entryCount: catalog.entries.length,
         legacyEntryCount: catalog.legacyEntries.length,
@@ -220,6 +267,22 @@ export const runCli = async (arguments_: string[]): Promise<number> => {
             .length,
         },
         usage: catalog.usage,
+        compression: {
+          compressedEntries: catalog.entries.filter(
+            (entry) => entry.encoding === "zstd"
+          ).length,
+          logicalArtifactBytes: checkedSum(
+            catalog.entries.map((entry) => entry.logicalArtifactBytes),
+            "Logical artifact storage"
+          ),
+          payloadBytes: checkedSum(
+            catalog.entries.map((entry) => entry.payloadBytes ?? 0),
+            "Compressed payload storage"
+          ),
+          grossSavedBytes,
+          restoreBytes: catalog.usage.restoreCommittedBytes,
+          netSavedBytes: grossSavedBytes - catalog.usage.restoreCommittedBytes,
+        },
         policy,
         hitRate: telemetry.hitRate,
         estimatedTimeSavedMs:
@@ -244,9 +307,24 @@ export const runCli = async (arguments_: string[]): Promise<number> => {
           } Android)`
         );
         console.log(
-          `Total managed and legacy usage: ${formatSizeBytes(
+          `Apparent managed cache bytes: ${formatSizeBytes(
+            output.usage.managedBytes
+          )}; provider and legacy bytes: ${formatSizeBytes(
             output.usage.totalBytes
           )}`
+        );
+        console.log(
+          `Compression: ${
+            output.compression.compressedEntries
+          } entries represent ${formatSizeBytes(
+            output.compression.logicalArtifactBytes
+          )}; payloads ${formatSizeBytes(
+            output.compression.payloadBytes
+          )}; gross saved ${formatSizeBytes(
+            output.compression.grossSavedBytes
+          )}; restores ${formatSizeBytes(
+            output.compression.restoreBytes
+          )}; net saved ${formatSignedSize(output.compression.netSavedBytes)}`
         );
         console.log(
           output.hitRate === null
@@ -267,12 +345,18 @@ export const runCli = async (arguments_: string[]): Promise<number> => {
     }
 
     if (parsed.command === "doctor") {
-      const report = doctorCache(parsed.projectRoot);
+      const report = parsed.deep
+        ? await doctorCacheDeep(parsed.projectRoot)
+        : doctorCache(parsed.projectRoot);
       if (parsed.json) {
         printJson(report);
       } else if (report.healthy) {
         console.log(
-          `Cache is healthy (${report.checkedEntries} entries checked).`
+          `Cache is healthy (${report.checkedEntries} entries and ${
+            report.checkedRestores
+          } restores checked${
+            report.deep ? ", deep validation complete" : ""
+          }).`
         );
       } else {
         for (const issue of report.issues) {
@@ -280,6 +364,15 @@ export const runCli = async (arguments_: string[]): Promise<number> => {
             `${issue.severity.toUpperCase()} ${issue.code}: ${issue.message}`
           );
         }
+      }
+      if (!parsed.json) {
+        console.log(
+          `Compression storage: gross saved ${formatSizeBytes(
+            report.compression.grossSavedBytes
+          )}; restores ${formatSizeBytes(
+            report.compression.restoreBytes
+          )}; net saved ${formatSignedSize(report.compression.netSavedBytes)}.`
+        );
       }
       return report.healthy ? 0 : 1;
     }
@@ -320,7 +413,15 @@ export const runCli = async (arguments_: string[]): Promise<number> => {
       console.log(
         `${action} ${
           parsed.dryRun ? result.candidates.length : result.removed.length
-        } entries and reclaim ${formatSizeBytes(result.reclaimedBytes)}.`
+        } source entries and ${
+          parsed.dryRun
+            ? result.auxiliaryCandidates.length
+            : result.auxiliaryRemoved.length
+        } auxiliary items; restore bytes ${formatSizeBytes(
+          (parsed.dryRun ? result.auxiliaryCandidates : result.auxiliaryRemoved)
+            .filter((candidate) => candidate.category === "restore")
+            .reduce((total, candidate) => total + candidate.sizeBytes, 0)
+        )}; reclaim ${formatSizeBytes(result.reclaimedBytes)} apparent bytes.`
       );
       if (result.skipped.length > 0) {
         console.log(`${result.skipped.length} entries were protected or busy.`);

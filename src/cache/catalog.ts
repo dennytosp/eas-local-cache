@@ -23,6 +23,23 @@ export type CatalogEntry = {
   protectedUntil: string | null;
   manifest: CacheManifest;
   accessIssue: string | null;
+  encoding: "none" | "zstd";
+  logicalArtifactBytes: number;
+  payloadBytes: number | null;
+  compressionRatio: number | null;
+  grossCompressionSavedBytes: number;
+  restoreBytes: number;
+};
+
+export type CatalogRestore = {
+  platform: CachePlatform | null;
+  entryId: string | null;
+  directory: string;
+  sizeBytes: number;
+  modifiedAt: string;
+  sourceEntry: CatalogEntry | null;
+  metadataValid: boolean;
+  metadataIssue: string | null;
 };
 
 export type CatalogIssue = {
@@ -36,6 +53,7 @@ export type CacheCatalog = {
   projectRoot: string;
   paths: CachePaths;
   entries: CatalogEntry[];
+  restores: CatalogRestore[];
   invalidEntries: Array<{
     platform: CachePlatform | null;
     entryId: string | null;
@@ -59,6 +77,8 @@ export type CacheCatalog = {
     stateBytes: number;
     locksBytes: number;
     eventsBytes: number;
+    restoreCommittedBytes: number;
+    restoreStagingBytes: number;
     otherBytes: number;
     legacyBytes: number;
     managedBytes: number;
@@ -72,6 +92,153 @@ export type CacheCatalog = {
 };
 
 const ENTRY_ID_PATTERN = /^[a-f0-9]{64}$/;
+const MAX_RESTORE_MANIFEST_BYTES = 16 * 1024;
+
+const readRestoreMetadata = (
+  directory: string,
+  sourceEntry: CatalogEntry
+): string | null => {
+  const manifestPath = path.join(directory, "restore.json");
+  const descriptor = fs.openSync(
+    manifestPath,
+    fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW
+  );
+  try {
+    const stats = fs.fstatSync(descriptor);
+    if (
+      !stats.isFile() ||
+      stats.size <= 0 ||
+      stats.size > MAX_RESTORE_MANIFEST_BYTES
+    ) {
+      return "Restore manifest must be a bounded regular file";
+    }
+    const parsed: unknown = JSON.parse(fs.readFileSync(descriptor, "utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return "Restore manifest is malformed";
+    }
+    const record = parsed as Record<string, unknown>;
+    if (sourceEntry.manifest.schemaVersion !== 2) {
+      return "Restore source entry is not compressed";
+    }
+    if (
+      Object.keys(record).sort().join(",") !==
+        "artifactDigest,entryId,payloadDigest,platform,schemaVersion" ||
+      record.schemaVersion !== 1 ||
+      record.platform !== sourceEntry.platform ||
+      record.entryId !== sourceEntry.entryId ||
+      record.payloadDigest !== sourceEntry.manifest.payload.integrity.digest ||
+      record.artifactDigest !== sourceEntry.manifest.artifact.integrity.digest
+    ) {
+      return "Restore metadata does not match its compressed source entry";
+    }
+    return null;
+  } catch (error) {
+    return error instanceof Error
+      ? error.message
+      : "Restore metadata is invalid";
+  } finally {
+    fs.closeSync(descriptor);
+  }
+};
+
+const readRestores = (
+  paths: CachePaths,
+  entries: CatalogEntry[],
+  issues: CatalogIssue[]
+): CatalogRestore[] => {
+  if (!pathExists(paths.restoresRoot)) return [];
+  try {
+    assertManagedDirectory(paths.providerRoot, paths.restoresRoot);
+  } catch (error) {
+    issues.push({
+      code: "unsafe-restores-root",
+      path: paths.restoresRoot,
+      message: error instanceof Error ? error.message : "Unsafe restores root",
+      severity: "error",
+    });
+    return [];
+  }
+
+  const restores: CatalogRestore[] = [];
+  for (const name of fs.readdirSync(paths.restoresRoot).sort()) {
+    if (name === "staging") continue;
+    const platformRoot = path.join(paths.restoresRoot, name);
+    if (name !== "android" && name !== "ios") {
+      const stats = fs.lstatSync(platformRoot);
+      const restore: CatalogRestore = {
+        platform: null,
+        entryId: null,
+        directory: platformRoot,
+        sizeBytes: calculatePathSize(platformRoot),
+        modifiedAt: new Date(stats.mtimeMs).toISOString(),
+        sourceEntry: null,
+        metadataValid: false,
+        metadataIssue:
+          "Unexpected data exists directly under the restores root",
+      };
+      restores.push(restore);
+      issues.push({
+        code: "invalid-restore",
+        path: platformRoot,
+        message: restore.metadataIssue!,
+        severity: "warning",
+      });
+      continue;
+    }
+    try {
+      assertManagedDirectory(paths.providerRoot, platformRoot);
+      for (const entryId of fs.readdirSync(platformRoot).sort()) {
+        const directory = path.join(platformRoot, entryId);
+        const stats = fs.lstatSync(directory);
+        const sourceEntry = ENTRY_ID_PATTERN.test(entryId)
+          ? entries.find(
+              (entry) => entry.platform === name && entry.entryId === entryId
+            ) ?? null
+          : null;
+        let metadataIssue: string | null = null;
+        try {
+          assertManagedDirectory(paths.providerRoot, directory);
+          metadataIssue = sourceEntry
+            ? readRestoreMetadata(directory, sourceEntry)
+            : "Restore has no matching compressed source entry";
+        } catch (error) {
+          metadataIssue =
+            error instanceof Error ? error.message : "Restore is unsafe";
+        }
+        const restore: CatalogRestore = {
+          platform: name,
+          entryId: ENTRY_ID_PATTERN.test(entryId) ? entryId : null,
+          directory,
+          sizeBytes: calculatePathSize(directory),
+          modifiedAt: new Date(stats.mtimeMs).toISOString(),
+          sourceEntry,
+          metadataValid: metadataIssue === null,
+          metadataIssue,
+        };
+        restores.push(restore);
+        if (metadataIssue) {
+          issues.push({
+            code: sourceEntry ? "invalid-restore" : "orphan-restore",
+            path: directory,
+            message: metadataIssue,
+            severity: "warning",
+          });
+        }
+      }
+    } catch (error) {
+      issues.push({
+        code: "unsafe-restores-root",
+        path: platformRoot,
+        message:
+          error instanceof Error
+            ? error.message
+            : "Unsafe platform restore root",
+        severity: "error",
+      });
+    }
+  }
+  return restores;
+};
 
 const readInvalidProtection = (
   paths: CachePaths,
@@ -188,17 +355,51 @@ const readEntry = (
       });
     }
 
+    const restoreDirectory = path.join(paths.restoresRoot, platform, entryId);
+    let restoreBytes = 0;
+    if (pathExists(restoreDirectory)) {
+      try {
+        assertManagedDirectory(paths.providerRoot, restoreDirectory);
+        restoreBytes = calculatePathSize(restoreDirectory);
+      } catch {
+        // Detailed restore validation runs after all source entries are known.
+      }
+    }
+    const encoding = manifest.schemaVersion === 2 ? "zstd" : "none";
+    const entryBytes = calculatePathSize(directory);
+    const grossCompressionSavedBytes =
+      manifest.schemaVersion === 2
+        ? manifest.payload.schema1EquivalentBytes - entryBytes
+        : 0;
+    if (
+      !Number.isSafeInteger(grossCompressionSavedBytes) ||
+      grossCompressionSavedBytes < 0
+    ) {
+      throw new Error(
+        "Compressed cache metadata cannot claim less storage than the committed entry"
+      );
+    }
     return {
       platform,
       entryId,
       fingerprintHash: manifest.fingerprintHash,
       directory,
-      sizeBytes: calculatePathSize(directory),
+      sizeBytes: entryBytes,
       createdAt: manifest.createdAt,
       lastAccessedAt,
       protectedUntil,
       manifest,
       accessIssue,
+      encoding,
+      logicalArtifactBytes: manifest.artifact.sizeBytes,
+      payloadBytes:
+        manifest.schemaVersion === 2 ? manifest.payload.sizeBytes : null,
+      compressionRatio:
+        manifest.schemaVersion === 2 && manifest.artifact.sizeBytes > 0
+          ? manifest.payload.sizeBytes / manifest.artifact.sizeBytes
+          : null,
+      grossCompressionSavedBytes,
+      restoreBytes,
     };
   } catch (error) {
     issues.push({
@@ -349,6 +550,7 @@ export const inventoryCache = (projectRoot: string): CacheCatalog => {
       projectRoot: managedProjectRoot,
       paths,
       entries: [],
+      restores: [],
       invalidEntries: [],
       issues: [],
       telemetry: { eventCount: 0, invalidEventCount: 0 },
@@ -363,6 +565,8 @@ export const inventoryCache = (projectRoot: string): CacheCatalog => {
         stateBytes: 0,
         locksBytes: 0,
         eventsBytes: 0,
+        restoreCommittedBytes: 0,
+        restoreStagingBytes: 0,
         otherBytes: 0,
         legacyBytes,
         managedBytes: 0,
@@ -378,6 +582,7 @@ export const inventoryCache = (projectRoot: string): CacheCatalog => {
       projectRoot: managedProjectRoot,
       paths,
       entries: [],
+      restores: [],
       invalidEntries: [],
       issues: [
         {
@@ -400,6 +605,8 @@ export const inventoryCache = (projectRoot: string): CacheCatalog => {
         stateBytes: 0,
         locksBytes: 0,
         eventsBytes: 0,
+        restoreCommittedBytes: 0,
+        restoreStagingBytes: 0,
         otherBytes: 0,
         legacyBytes: 0,
         managedBytes: 0,
@@ -410,6 +617,7 @@ export const inventoryCache = (projectRoot: string): CacheCatalog => {
 
   const invalidEntries: CacheCatalog["invalidEntries"] = [];
   const entries = readEntries(paths, issues, invalidEntries);
+  const restores = readRestores(paths, entries, issues);
   const legacyEntries = readLegacyEntries(paths);
   const entriesBytes = entries.reduce(
     (total, entry) => total + entry.sizeBytes,
@@ -464,6 +672,21 @@ export const inventoryCache = (projectRoot: string): CacheCatalog => {
     issues,
     "unsafe-events-root"
   );
+  const restoreStagingBytes = safeDirectorySize(
+    paths.providerRoot,
+    paths.restoreStagingRoot,
+    issues,
+    "unsafe-restore-staging-root"
+  );
+  const restoreCommittedBytes = Math.max(
+    0,
+    safeDirectorySize(
+      paths.providerRoot,
+      paths.restoresRoot,
+      issues,
+      "unsafe-restores-root"
+    ) - restoreStagingBytes
+  );
   let eventCount = 0;
   let invalidEventCount = 0;
   try {
@@ -502,15 +725,23 @@ export const inventoryCache = (projectRoot: string): CacheCatalog => {
     accessBytes +
     stateBytes +
     locksBytes +
-    eventsBytes;
+    eventsBytes +
+    restoreCommittedBytes +
+    restoreStagingBytes;
   const otherBytes = Math.max(0, providerBytes - categorizedProviderBytes);
   const managedBytes =
-    entriesStorageBytes + stagingBytes + quarantineBytes + trashBytes;
+    entriesStorageBytes +
+    stagingBytes +
+    restoreCommittedBytes +
+    restoreStagingBytes +
+    quarantineBytes +
+    trashBytes;
 
   return {
     projectRoot: managedProjectRoot,
     paths,
     entries,
+    restores,
     invalidEntries,
     issues,
     telemetry: { eventCount, invalidEventCount },
@@ -525,6 +756,8 @@ export const inventoryCache = (projectRoot: string): CacheCatalog => {
       stateBytes,
       locksBytes,
       eventsBytes,
+      restoreCommittedBytes,
+      restoreStagingBytes,
       otherBytes,
       legacyBytes,
       managedBytes,

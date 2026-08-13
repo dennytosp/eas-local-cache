@@ -30,6 +30,7 @@ import {
 } from "./cache/insight";
 import {
   normalizeCacheOptions,
+  normalizeCompressionOptions,
   normalizeEnvironmentOptions,
   type CacheProviderOptions,
 } from "./cache/options";
@@ -88,6 +89,8 @@ type PendingBuild = {
   fingerprintHash: string;
   missStartedAtMs: number;
   ambiguous: boolean;
+  missReason: CacheMissReason;
+  compressedPayloadDigest?: string;
   updatedAtMs: number;
 };
 
@@ -199,6 +202,12 @@ const explanationForDirectReason = (
       return {
         code: "legacy-invalid",
         message: "the legacy artifact was incomplete or invalid",
+      };
+    case "compression-unavailable":
+      return {
+        code: "no-entry",
+        message:
+          "zstd is unavailable, so the compressed entry cannot be restored",
       };
     default:
       return { code: "no-entry", message: "no matching local entry exists" };
@@ -344,6 +353,7 @@ const plugin: BuildCacheProviderPlugin<CacheProviderOptions> = {
   ) => {
     pruneLifecycleState();
     try {
+      normalizeCompressionOptions(options);
       const baseCalculation = await calculateProjectFingerprint(props);
       const environmentOptions = normalizeEnvironmentOptions(options);
       const profile = normalizeRunProfile(props.platform, props.runOptions);
@@ -405,7 +415,7 @@ const plugin: BuildCacheProviderPlugin<CacheProviderOptions> = {
 
   resolveBuildCache: async (
     props: ResolveBuildCacheProps,
-    _options: CacheProviderOptions
+    options: CacheProviderOptions = {}
   ) => {
     const { fingerprintHash, platform, projectRoot } = props;
     const fingerprint = shortFingerprint(fingerprintHash);
@@ -432,7 +442,7 @@ const plugin: BuildCacheProviderPlugin<CacheProviderOptions> = {
         let estimatedTimeSavedMs: number | undefined;
         if (result.source === "versioned") {
           try {
-            const insight = readInsight(path.dirname(result.path));
+            const insight = readInsight(result.entryDirectory!);
             if (
               insight &&
               insight.entryId === getEntryId(platform, fingerprintHash) &&
@@ -460,6 +470,18 @@ const plugin: BuildCacheProviderPlugin<CacheProviderOptions> = {
             ? {}
             : { estimatedTimeSavedMs }),
         });
+        if (result.materializedRestore) {
+          try {
+            const policy = normalizeCacheOptions(options);
+            if (policy.autoPrune) {
+              await pruneCache(projectRoot, policy, {
+                protectedEntryIds: [getEntryId(platform, fingerprintHash)],
+              });
+            }
+          } catch (error) {
+            console.warn("Automatic restore cleanup was skipped", error);
+          }
+        }
         calculations.delete(key);
         pendingBuilds.delete(key);
         console.log(`Cache hit for ${platform} fingerprint ${fingerprint}`);
@@ -478,6 +500,10 @@ const plugin: BuildCacheProviderPlugin<CacheProviderOptions> = {
           fingerprintHash,
           missStartedAtMs: pending?.missStartedAtMs ?? nowMs,
           ambiguous: Boolean(pending),
+          missReason: result.reason,
+          ...(result.compressedPayloadDigest
+            ? { compressedPayloadDigest: result.compressedPayloadDigest }
+            : {}),
         },
         nowMs
       );
@@ -556,7 +582,18 @@ const plugin: BuildCacheProviderPlugin<CacheProviderOptions> = {
       const cachePath = await uploadCacheEntry(
         { projectRoot, platform, fingerprintHash },
         buildPath,
-        insight ? { insight } : {}
+        {
+          ...(insight ? { insight } : {}),
+          compressionMode: normalizeCompressionOptions(options).compressionMode,
+          replaceCompressedUnavailable:
+            pending?.missReason === "compression-unavailable" &&
+            Boolean(pending.compressedPayloadDigest),
+          ...(pending?.compressedPayloadDigest
+            ? {
+                replaceCompressedPayloadDigest: pending.compressedPayloadDigest,
+              }
+            : {}),
+        }
       );
       console.log(`Cached ${platform} build at ${cachePath}`);
 

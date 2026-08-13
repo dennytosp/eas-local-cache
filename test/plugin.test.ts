@@ -164,6 +164,15 @@ const entryDirectory = (
   );
 
 describe("provider resolution", () => {
+  it("disables caching before fingerprinting when compression is invalid", async () => {
+    expect(
+      await calculateFingerprintHashCallback(calculateProps("android"), {
+        toolchain: "off",
+        compression: "gzip",
+      } as never)
+    ).toBeNull();
+  });
+
   it("records a miss without creating an artifact entry", async () => {
     const result = await resolveBuildCache(
       resolveProps("android", "abc123"),

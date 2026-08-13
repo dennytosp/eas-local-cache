@@ -47,11 +47,11 @@ export type PruneResult = {
 
 export type AuxiliaryPruneCandidate = {
   path: string;
-  category: "staging" | "quarantine" | "trash" | "invalid-entry";
+  category: "staging" | "quarantine" | "trash" | "invalid-entry" | "restore";
   sizeBytes: number;
   modifiedAt: string;
   entryId: string | null;
-  reason: "abandoned" | "expired" | "max-size";
+  reason: "abandoned" | "expired" | "max-size" | "source-removal";
 };
 
 export type PruneOptions = {
@@ -74,6 +74,8 @@ const getAuxiliaryEntryId = (
   const pattern =
     category === "staging"
       ? /^([a-f0-9]{64})-/
+      : category === "restore"
+      ? /^([a-f0-9]{64})$/
       : /^(?:android|ios)-([a-f0-9]{64})-/;
   return pattern.exec(name)?.[1] ?? null;
 };
@@ -106,8 +108,58 @@ const listAuxiliary = (
   const roots = [
     ["trash", catalog.paths.trashRoot],
     ["staging", catalog.paths.stagingRoot],
+    ["staging", catalog.paths.restoreStagingRoot],
     ["quarantine", catalog.paths.quarantineRoot],
   ] as const;
+
+  for (const restore of catalog.restores) {
+    if (restore.metadataValid) continue;
+    if (
+      restore.entryId &&
+      (protectedEntryIds.has(restore.entryId) ||
+        (restore.sourceEntry?.protectedUntil &&
+          Date.parse(restore.sourceEntry.protectedUntil) > nowMs))
+    ) {
+      continue;
+    }
+    candidates.push({
+      path: restore.directory,
+      category: "restore",
+      sizeBytes: restore.sizeBytes,
+      modifiedAt: restore.modifiedAt,
+      entryId: restore.entryId,
+      reason: "abandoned",
+    });
+  }
+
+  const selectedRestorePaths = new Set(
+    candidates
+      .filter((candidate) => candidate.category === "restore")
+      .map((candidate) => candidate.path)
+  );
+  for (const entry of catalog.entries) {
+    const restorePath = path.join(
+      catalog.paths.restoresRoot,
+      entry.platform,
+      entry.entryId
+    );
+    if (
+      entry.restoreBytes > 0 &&
+      !selectedRestorePaths.has(restorePath) &&
+      policy.retentionMs !== null &&
+      Date.parse(entry.lastAccessedAt) < nowMs - policy.retentionMs &&
+      (!entry.protectedUntil || Date.parse(entry.protectedUntil) <= nowMs)
+    ) {
+      candidates.push({
+        path: restorePath,
+        category: "restore",
+        sizeBytes: entry.restoreBytes,
+        modifiedAt: entry.lastAccessedAt,
+        entryId: entry.entryId,
+        reason: "expired",
+      });
+    }
+  }
 
   for (const [category, root] of roots) {
     if (!pathExists(root)) {
@@ -164,7 +216,9 @@ const addAuxiliaryForSize = (
     catalog.usage.invalidEntriesBytes +
     catalog.usage.stagingBytes +
     catalog.usage.quarantineBytes +
-    catalog.usage.trashBytes -
+    catalog.usage.trashBytes +
+    catalog.usage.restoreCommittedBytes +
+    catalog.usage.restoreStagingBytes -
     selected.reduce((total, candidate) => total + candidate.sizeBytes, 0);
   if (projectedBytes <= policy.maxSizeBytes) {
     return selected;
@@ -185,9 +239,32 @@ const addAuxiliaryForSize = (
       entryId: entry.entryId,
       reason: "max-size" as const,
     }));
+  for (const entry of catalog.entries) {
+    const restorePath = path.join(
+      catalog.paths.restoresRoot,
+      entry.platform,
+      entry.entryId
+    );
+    if (
+      entry.restoreBytes > 0 &&
+      !selectedPaths.has(restorePath) &&
+      !protectedEntryIds.has(entry.entryId) &&
+      (!entry.protectedUntil || Date.parse(entry.protectedUntil) <= nowMs)
+    ) {
+      remaining.push({
+        path: restorePath,
+        category: "restore",
+        sizeBytes: entry.restoreBytes,
+        modifiedAt: entry.lastAccessedAt,
+        entryId: entry.entryId,
+        reason: "max-size",
+      });
+    }
+  }
   for (const [category, root] of [
     ["quarantine", catalog.paths.quarantineRoot],
     ["staging", catalog.paths.stagingRoot],
+    ["staging", catalog.paths.restoreStagingRoot],
   ] as const) {
     if (!pathExists(root)) {
       continue;
@@ -361,7 +438,7 @@ export const pruneCache = async (
     nowMs,
     protectedEntryIds
   );
-  const auxiliaryReclaimableBytes = auxiliaryCandidates.reduce(
+  let auxiliaryReclaimableBytes = auxiliaryCandidates.reduce(
     (total, candidate) => total + candidate.sizeBytes,
     0
   );
@@ -369,7 +446,9 @@ export const pruneCache = async (
     catalog.usage.invalidEntriesBytes +
     catalog.usage.stagingBytes +
     catalog.usage.quarantineBytes +
-    catalog.usage.trashBytes;
+    catalog.usage.trashBytes +
+    catalog.usage.restoreCommittedBytes +
+    catalog.usage.restoreStagingBytes;
   const entryPolicy = {
     ...policy,
     maxSizeBytes:
@@ -381,7 +460,34 @@ export const pruneCache = async (
               Math.max(0, auxiliaryBytes - auxiliaryReclaimableBytes)
           ),
   };
-  const candidates = planPrune(catalog.entries, entryPolicy, options);
+  let candidates = planPrune(catalog.entries, entryPolicy, options);
+  const auxiliaryPaths = new Set(
+    auxiliaryCandidates.map((candidate) => candidate.path)
+  );
+  if (options.dryRun) {
+    for (const candidate of candidates) {
+      const entry = catalog.entries.find(
+        (item) => item.entryId === candidate.entryId
+      );
+      if (!entry || entry.restoreBytes === 0) continue;
+      const restorePath = path.join(
+        catalog.paths.restoresRoot,
+        entry.platform,
+        entry.entryId
+      );
+      if (auxiliaryPaths.has(restorePath)) continue;
+      auxiliaryCandidates.push({
+        path: restorePath,
+        category: "restore",
+        sizeBytes: entry.restoreBytes,
+        modifiedAt: entry.lastAccessedAt,
+        entryId: entry.entryId,
+        reason: "source-removal",
+      });
+      auxiliaryPaths.add(restorePath);
+      auxiliaryReclaimableBytes += entry.restoreBytes;
+    }
+  }
   const initialBytes = catalog.usage.entriesBytes;
   const initialCount = catalog.entries.length;
 
@@ -457,6 +563,7 @@ export const pruneCache = async (
     (issue) => `${issue.code}: ${issue.message}`
   );
   issues.push(...telemetryIssues);
+  let sourceCatalog = catalog;
   try {
     ensureManagedDirectory(catalog.paths.providerRoot, catalog.paths.trashRoot);
     for (const candidate of auxiliaryCandidates) {
@@ -514,6 +621,17 @@ export const pruneCache = async (
           );
           fs.renameSync(candidate.path, tombstone);
           fs.rmSync(tombstone, { recursive: true, force: true });
+        } else if (candidate.category === "restore") {
+          assertManagedDirectory(
+            catalog.paths.providerRoot,
+            path.dirname(candidate.path)
+          );
+          const tombstone = path.join(
+            catalog.paths.trashRoot,
+            `restore-${candidate.entryId ?? "orphan"}-${crypto.randomUUID()}`
+          );
+          fs.renameSync(candidate.path, tombstone);
+          fs.rmSync(tombstone, { recursive: true, force: true });
         } else {
           fs.rmSync(candidate.path, { recursive: true, force: true });
         }
@@ -531,8 +649,25 @@ export const pruneCache = async (
       }
     }
 
+    sourceCatalog = inventoryCache(projectRoot);
+    const remainingAuxiliaryBytes = Math.max(
+      0,
+      sourceCatalog.usage.managedBytes - sourceCatalog.usage.entriesBytes
+    );
+    candidates = planPrune(
+      sourceCatalog.entries,
+      {
+        ...policy,
+        maxSizeBytes:
+          policy.maxSizeBytes === null
+            ? null
+            : Math.max(0, policy.maxSizeBytes - remainingAuxiliaryBytes),
+      },
+      options
+    );
+
     for (const candidate of candidates) {
-      const entry = catalog.entries.find(
+      const entry = sourceCatalog.entries.find(
         (item) => item.entryId === candidate.entryId
       );
       if (!entry || !pathExists(entry.directory)) {
@@ -609,6 +744,48 @@ export const pruneCache = async (
           `${candidate.platform}-${candidate.entryId}-${crypto.randomUUID()}`
         );
         fs.renameSync(entry.directory, tombstone);
+        const restoreDirectory = path.join(
+          catalog.paths.restoresRoot,
+          candidate.platform,
+          candidate.entryId
+        );
+        let restoreTombstone: string | null = null;
+        let removedRestore: AuxiliaryPruneCandidate | null = null;
+        if (pathExists(restoreDirectory)) {
+          try {
+            assertManagedDirectory(
+              catalog.paths.providerRoot,
+              path.dirname(restoreDirectory)
+            );
+            restoreTombstone = path.join(
+              catalog.paths.trashRoot,
+              `restore-${candidate.entryId}-${crypto.randomUUID()}`
+            );
+            fs.renameSync(restoreDirectory, restoreTombstone);
+            removedRestore = auxiliaryCandidates.find(
+              (auxiliary) => auxiliary.path === restoreDirectory
+            ) ?? {
+              path: restoreDirectory,
+              category: "restore",
+              sizeBytes: entry.restoreBytes,
+              modifiedAt: entry.lastAccessedAt,
+              entryId: entry.entryId,
+              reason: "source-removal",
+            };
+            if (
+              !auxiliaryCandidates.some(
+                (auxiliary) => auxiliary.path === restoreDirectory
+              )
+            ) {
+              auxiliaryCandidates.push(removedRestore);
+            }
+          } catch (error) {
+            if (!pathExists(entry.directory) && pathExists(tombstone)) {
+              fs.renameSync(tombstone, entry.directory);
+            }
+            throw error;
+          }
+        }
         try {
           removeAccessRecord(
             catalog.paths.accessRoot,
@@ -622,8 +799,20 @@ export const pruneCache = async (
             }`
           );
         }
-        fs.rmSync(tombstone, { recursive: true, force: true });
         removed.push(candidate);
+        if (removedRestore) auxiliaryRemoved.push(removedRestore);
+        for (const disposable of [tombstone, restoreTombstone]) {
+          if (!disposable) continue;
+          try {
+            fs.rmSync(disposable, { recursive: true, force: true });
+          } catch (error) {
+            issues.push(
+              `Could not remove cleanup tombstone: ${
+                error instanceof Error ? error.message : "unknown error"
+              }`
+            );
+          }
+        }
       } catch (error) {
         issues.push(
           `Could not prune ${candidate.entryId}: ${
@@ -638,16 +827,12 @@ export const pruneCache = async (
     releaseEntryLock(maintenanceLock);
   }
 
-  const reclaimedBytes =
-    removed.reduce((total, entry) => total + entry.sizeBytes, 0) +
-    auxiliaryRemoved.reduce(
-      (total, candidate) => total + candidate.sizeBytes,
-      0
-    );
-  const remainingEntries = initialCount - removed.length;
-  const remainingBytes = Math.max(
+  const finalCatalog = inventoryCache(projectRoot);
+  const remainingEntries = finalCatalog.entries.length;
+  const remainingBytes = finalCatalog.usage.managedBytes;
+  const reclaimedBytes = Math.max(
     0,
-    initialBytes + auxiliaryBytes - reclaimedBytes
+    catalog.usage.managedBytes - remainingBytes
   );
   return {
     dryRun: false,
