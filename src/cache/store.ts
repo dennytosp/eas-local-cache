@@ -2,155 +2,75 @@ import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
 
+import { touchAccessRecord } from "./access";
 import { copyArtifact, validateSourceArtifact } from "./copy";
+import { prepareCompressedEntry } from "./compression";
+import {
+  assertManagedDirectory,
+  assertProviderRoot,
+  ensureManagedDirectory,
+  ensureProviderRoot,
+  pathExists,
+} from "./filesystem";
 import { inspectArtifact } from "./integrity";
+import {
+  INSIGHT_FILENAME,
+  writeInsightAtomically,
+  type CacheInsight,
+} from "./insight";
 import { acquireEntryLock, releaseEntryLock } from "./lock";
 import {
   CACHE_SCHEMA_VERSION,
-  CacheManifest,
   readManifest,
+  type CacheManifest,
+  type CacheManifestV1,
   writeManifest,
 } from "./manifest";
 import {
   CachePlatform,
   getArtifactName,
+  getCompressedArtifactName,
   getCachePaths,
   getEntryDirectory,
   getEntryId,
   getLegacyArtifactPath,
+  getRestoreDirectory,
 } from "./paths";
+import { materializeCompressedArtifact } from "./restore";
+import { validateEntry } from "./validation";
+import type { CompressionMode } from "./options";
+import type { ZstdCodec } from "./zstd";
 
 type CacheIdentity = {
   projectRoot: string;
   platform: CachePlatform;
   fingerprintHash: string;
+  codec?: ZstdCodec | null;
 };
 
-type ValidationResult =
-  | { valid: true; artifactPath: string; manifest: CacheManifest }
-  | { valid: false; reason: string };
+export type CacheMissReason =
+  | "not-found"
+  | "corrupt"
+  | "lock-busy"
+  | "unsafe-legacy-path"
+  | "legacy-invalid"
+  | "compression-unavailable";
 
-const pathExists = (candidate: string): boolean => {
-  try {
-    fs.lstatSync(candidate);
-    return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return false;
+export type CacheResolveResult =
+  | {
+      outcome: "hit";
+      path: string;
+      source: "versioned" | "legacy";
+      entryDirectory: string | null;
+      materializedRestore: boolean;
     }
-    throw error;
-  }
-};
+  | {
+      outcome: "miss";
+      reason: CacheMissReason;
+      compressedPayloadDigest?: string;
+    };
 
-const isPathInside = (root: string, candidate: string): boolean => {
-  const relative = path.relative(root, candidate);
-  return (
-    relative === "" ||
-    (!relative.startsWith(`..${path.sep}`) &&
-      relative !== ".." &&
-      !path.isAbsolute(relative))
-  );
-};
-
-const assertManagedDirectory = (
-  providerRoot: string,
-  candidate: string
-): void => {
-  const providerStats = fs.lstatSync(providerRoot);
-  const candidateStats = fs.lstatSync(candidate);
-  if (
-    providerStats.isSymbolicLink() ||
-    !providerStats.isDirectory() ||
-    candidateStats.isSymbolicLink() ||
-    !candidateStats.isDirectory()
-  ) {
-    throw new Error("Cache-managed paths must be real directories");
-  }
-
-  const realProviderRoot = fs.realpathSync(providerRoot);
-  const realCandidate = fs.realpathSync(candidate);
-  if (!isPathInside(realProviderRoot, realCandidate)) {
-    throw new Error("Cache-managed path escapes the provider root");
-  }
-};
-
-const ensureRealDirectoryTree = (root: string, candidate: string): void => {
-  const resolvedRoot = path.resolve(root);
-  const resolvedCandidate = path.resolve(candidate);
-  const rootStats = fs.lstatSync(resolvedRoot);
-  if (rootStats.isSymbolicLink() || !rootStats.isDirectory()) {
-    throw new Error("Cache-managed roots must be real directories");
-  }
-
-  if (!isPathInside(resolvedRoot, resolvedCandidate)) {
-    throw new Error("Cache-managed path escapes its trusted root");
-  }
-
-  const realRoot = fs.realpathSync(resolvedRoot);
-  const relative = path.relative(resolvedRoot, resolvedCandidate);
-  let current = resolvedRoot;
-
-  for (const segment of relative.split(path.sep).filter(Boolean)) {
-    current = path.join(current, segment);
-    try {
-      const stats = fs.lstatSync(current);
-      if (stats.isSymbolicLink() || !stats.isDirectory()) {
-        throw new Error("Cache-managed paths must be real directories");
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-        throw error;
-      }
-      try {
-        fs.mkdirSync(current);
-      } catch (mkdirError) {
-        if ((mkdirError as NodeJS.ErrnoException).code !== "EEXIST") {
-          throw mkdirError;
-        }
-      }
-      const stats = fs.lstatSync(current);
-      if (stats.isSymbolicLink() || !stats.isDirectory()) {
-        throw new Error("Cache-managed paths must be real directories");
-      }
-    }
-
-    if (!isPathInside(realRoot, fs.realpathSync(current))) {
-      throw new Error("Cache-managed path escapes its trusted root");
-    }
-  }
-};
-
-const ensureManagedDirectory = (providerRoot: string, candidate: string) =>
-  ensureRealDirectoryTree(providerRoot, candidate);
-
-const assertProviderRoot = (
-  projectRoot: string,
-  providerRoot: string
-): void => {
-  const projectStats = fs.lstatSync(projectRoot);
-  const providerStats = fs.lstatSync(providerRoot);
-  if (
-    !projectStats.isDirectory() ||
-    providerStats.isSymbolicLink() ||
-    !providerStats.isDirectory()
-  ) {
-    throw new Error("The cache provider root must be a real directory");
-  }
-
-  if (
-    !isPathInside(fs.realpathSync(projectRoot), fs.realpathSync(providerRoot))
-  ) {
-    throw new Error("The cache provider root escapes the project");
-  }
-};
-
-const ensureProviderRoot = (
-  projectRoot: string,
-  providerRoot: string
-): void => {
-  ensureRealDirectoryTree(projectRoot, providerRoot);
-  assertProviderRoot(projectRoot, providerRoot);
-};
+const COMPRESSED_RESOLVE_WAIT_MS = 2 * 60_000;
 
 const getPackageVersion = (): string => {
   try {
@@ -165,61 +85,14 @@ const getPackageVersion = (): string => {
   }
 };
 
-const validateEntry = (
-  entryDirectory: string,
-  providerRoot: string,
-  platform: CachePlatform,
-  fingerprintHash: string,
-  entryId: string
-): ValidationResult => {
-  try {
-    assertManagedDirectory(providerRoot, entryDirectory);
-    const manifest = readManifest(entryDirectory);
-    const expectedArtifactName = getArtifactName(platform);
-    const expectedType = platform === "ios" ? "directory" : "file";
-
-    if (
-      manifest.platform !== platform ||
-      manifest.fingerprintHash !== fingerprintHash ||
-      manifest.entryId !== entryId ||
-      manifest.artifact.relativePath !== expectedArtifactName ||
-      manifest.artifact.type !== expectedType
-    ) {
-      return { valid: false, reason: "manifest identity mismatch" };
-    }
-
-    const artifactPath = path.join(entryDirectory, expectedArtifactName);
-    if (path.dirname(artifactPath) !== path.resolve(entryDirectory)) {
-      return { valid: false, reason: "artifact path escapes the entry" };
-    }
-
-    const integrity = inspectArtifact(artifactPath, platform);
-    if (
-      integrity.algorithm !== manifest.artifact.integrity.algorithm ||
-      integrity.digest !== manifest.artifact.integrity.digest ||
-      integrity.sizeBytes !== manifest.artifact.sizeBytes ||
-      integrity.fileCount !== manifest.artifact.fileCount
-    ) {
-      return { valid: false, reason: "artifact integrity mismatch" };
-    }
-
-    return { valid: true, artifactPath, manifest };
-  } catch (error) {
-    return {
-      valid: false,
-      reason:
-        error instanceof Error ? error.message : "unknown validation error",
-    };
-  }
-};
-
 const quarantineEntry = (
   entryDirectory: string,
   providerRoot: string,
   quarantineRoot: string,
   platform: CachePlatform,
   entryId: string,
-  reason: string
+  reason: string,
+  restoreDirectory?: string
 ) => {
   if (!pathExists(entryDirectory)) {
     return;
@@ -232,7 +105,25 @@ const quarantineEntry = (
     quarantineRoot,
     `${platform}-${entryId}-${timestamp}-${crypto.randomUUID()}`
   );
-  fs.renameSync(entryDirectory, destination);
+  let restoreDestination: string | null = null;
+  if (restoreDirectory && pathExists(restoreDirectory)) {
+    assertManagedDirectory(providerRoot, path.dirname(restoreDirectory));
+    restoreDestination = `${destination}-restore`;
+    fs.renameSync(restoreDirectory, restoreDestination);
+  }
+  try {
+    fs.renameSync(entryDirectory, destination);
+  } catch (error) {
+    if (
+      restoreDestination &&
+      pathExists(restoreDestination) &&
+      restoreDirectory &&
+      !pathExists(restoreDirectory)
+    ) {
+      fs.renameSync(restoreDestination, restoreDirectory);
+    }
+    throw error;
+  }
 
   const metadataPath = `${destination}.json`;
   try {
@@ -269,32 +160,31 @@ const isLegacyArtifactValid = (
   }
 };
 
-export const resolveCacheEntry = async ({
+export const resolveCacheEntryDetailed = async ({
   projectRoot,
   platform,
   fingerprintHash,
-}: CacheIdentity): Promise<string | null> => {
+  codec,
+}: CacheIdentity): Promise<CacheResolveResult> => {
   const managedProjectRoot = fs.realpathSync(projectRoot);
   const paths = getCachePaths(managedProjectRoot);
   const entryId = getEntryId(platform, fingerprintHash);
   const entryDirectory = getEntryDirectory(paths, platform, entryId);
+  let versionedMissReason: CacheMissReason | null = null;
 
   if (pathExists(entryDirectory)) {
     assertProviderRoot(managedProjectRoot, paths.providerRoot);
-    const validation = validateEntry(
-      entryDirectory,
-      paths.providerRoot,
-      platform,
-      fingerprintHash,
-      entryId
-    );
-    if (validation.valid) {
-      return validation.artifactPath;
-    }
-
     ensureManagedDirectory(paths.providerRoot, paths.locksRoot);
+    let maxWaitMs = 250;
+    try {
+      if (readManifest(entryDirectory).schemaVersion === 2) {
+        maxWaitMs = COMPRESSED_RESOLVE_WAIT_MS;
+      }
+    } catch {
+      // Invalid entries should not extend the bounded corruption-recovery wait.
+    }
     const lock = await acquireEntryLock(paths.locksRoot, entryId, {
-      maxWaitMs: 250,
+      maxWaitMs,
       retryIntervalMs: 25,
     });
     if (lock) {
@@ -313,32 +203,117 @@ export const resolveCacheEntry = async ({
             paths.quarantineRoot,
             platform,
             entryId,
-            revalidation.reason
+            revalidation.reason,
+            getRestoreDirectory(paths, platform, entryId)
           );
           console.warn(
             `Ignored corrupt ${platform} cache entry: ${revalidation.reason}`
           );
         } else {
-          return revalidation.artifactPath;
+          let artifactPath = revalidation.artifactPath;
+          let materializedRestore = false;
+          if (revalidation.manifest.schemaVersion === 2) {
+            const restore = await materializeCompressedArtifact({
+              paths,
+              entryDirectory,
+              manifest: revalidation.manifest,
+              ...(codec === undefined ? {} : { codec }),
+            });
+            if (restore.status === "unavailable") {
+              return {
+                outcome: "miss",
+                reason: "compression-unavailable",
+                ...(restore.replaceable
+                  ? {
+                      compressedPayloadDigest:
+                        revalidation.manifest.payload.integrity.digest,
+                    }
+                  : {}),
+              };
+            }
+            if (restore.status === "invalid") {
+              quarantineEntry(
+                entryDirectory,
+                paths.providerRoot,
+                paths.quarantineRoot,
+                platform,
+                entryId,
+                restore.reason,
+                getRestoreDirectory(paths, platform, entryId)
+              );
+              return { outcome: "miss", reason: "corrupt" };
+            }
+            artifactPath = restore.artifactPath;
+            materializedRestore = restore.created;
+          }
+          try {
+            touchAccessRecord(paths.accessRoot, entryId, platform, {
+              providerRoot: paths.providerRoot,
+            });
+          } catch (error) {
+            console.warn("Could not update cache access metadata", error);
+          }
+          return {
+            outcome: "hit",
+            path: artifactPath!,
+            source: "versioned",
+            entryDirectory,
+            materializedRestore,
+          };
         }
       } finally {
         releaseEntryLock(lock);
       }
+      versionedMissReason = "corrupt";
+    } else {
+      versionedMissReason = "lock-busy";
     }
   }
 
   const legacyPath = getLegacyArtifactPath(paths, platform, fingerprintHash);
-  if (legacyPath && isLegacyArtifactValid(legacyPath, platform)) {
+  if (!legacyPath) {
+    return {
+      outcome: "miss",
+      reason: versionedMissReason ?? "unsafe-legacy-path",
+    };
+  }
+  if (isLegacyArtifactValid(legacyPath, platform)) {
     console.warn(`Using unverified legacy ${platform} cache entry`);
-    return legacyPath;
+    return {
+      outcome: "hit",
+      path: legacyPath,
+      source: "legacy",
+      entryDirectory: null,
+      materializedRestore: false,
+    };
+  }
+  if (pathExists(legacyPath)) {
+    return {
+      outcome: "miss",
+      reason: versionedMissReason ?? "legacy-invalid",
+    };
   }
 
-  return null;
+  return { outcome: "miss", reason: versionedMissReason ?? "not-found" };
+};
+
+export const resolveCacheEntry = async (
+  identity: CacheIdentity
+): Promise<string | null> => {
+  const result = await resolveCacheEntryDetailed(identity);
+  return result.outcome === "hit" ? result.path : null;
 };
 
 export const uploadCacheEntry = async (
   { projectRoot, platform, fingerprintHash }: CacheIdentity,
-  buildPath: string
+  buildPath: string,
+  options: {
+    insight?: CacheInsight;
+    compressionMode?: CompressionMode;
+    replaceCompressedUnavailable?: boolean;
+    replaceCompressedPayloadDigest?: string;
+    codec?: ZstdCodec | null;
+  } = {}
 ): Promise<string | null> => {
   validateSourceArtifact(buildPath, platform);
 
@@ -355,6 +330,8 @@ export const uploadCacheEntry = async (
   }
 
   let stagingDirectory: string | null = null;
+  let replacementTombstone: string | null = null;
+  let replacementRestoreTombstone: string | null = null;
   try {
     if (pathExists(entryDirectory)) {
       const existing = validateEntry(
@@ -365,16 +342,32 @@ export const uploadCacheEntry = async (
         entryId
       );
       if (existing.valid) {
-        return existing.artifactPath;
+        if (
+          !options.replaceCompressedUnavailable ||
+          existing.manifest.schemaVersion !== 2 ||
+          options.replaceCompressedPayloadDigest !==
+            existing.manifest.payload.integrity.digest
+        ) {
+          try {
+            touchAccessRecord(paths.accessRoot, entryId, platform, {
+              providerRoot: paths.providerRoot,
+            });
+          } catch (error) {
+            console.warn("Could not update cache access metadata", error);
+          }
+          return existing.artifactPath ?? existing.payloadPath;
+        }
+      } else {
+        quarantineEntry(
+          entryDirectory,
+          paths.providerRoot,
+          paths.quarantineRoot,
+          platform,
+          entryId,
+          existing.reason,
+          getRestoreDirectory(paths, platform, entryId)
+        );
       }
-      quarantineEntry(
-        entryDirectory,
-        paths.providerRoot,
-        paths.quarantineRoot,
-        platform,
-        entryId,
-        existing.reason
-      );
     }
 
     ensureManagedDirectory(paths.providerRoot, paths.stagingRoot);
@@ -384,11 +377,13 @@ export const uploadCacheEntry = async (
     );
 
     const artifactName = getArtifactName(platform);
-    const stagedArtifact = path.join(stagingDirectory, artifactName);
+    const logicalDirectory = path.join(stagingDirectory, "logical");
+    fs.mkdirSync(logicalDirectory, { mode: 0o700 });
+    const stagedArtifact = path.join(logicalDirectory, artifactName);
     copyArtifact(buildPath, stagedArtifact, platform);
     const integrity = inspectArtifact(stagedArtifact, platform);
 
-    const manifest: CacheManifest = {
+    const schema1Manifest: CacheManifestV1 = {
       schemaVersion: CACHE_SCHEMA_VERSION,
       platform,
       fingerprintHash,
@@ -409,6 +404,63 @@ export const uploadCacheEntry = async (
         },
       },
     };
+    if (options.insight) {
+      try {
+        if (
+          options.insight.platform !== platform ||
+          options.insight.fingerprintHash !== fingerprintHash ||
+          options.insight.entryId !== entryId
+        ) {
+          throw new Error("Cache insight identity does not match the entry");
+        }
+        writeInsightAtomically(stagingDirectory, options.insight);
+      } catch (error) {
+        try {
+          fs.rmSync(path.join(stagingDirectory, INSIGHT_FILENAME), {
+            force: true,
+          });
+        } catch {
+          // Diagnostic metadata must never block artifact publication.
+        }
+        console.warn("Could not persist cache insight", error);
+      }
+    }
+
+    let manifest: CacheManifest = schema1Manifest;
+    if (
+      (options.compressionMode ?? "off") === "zstd" &&
+      !options.replaceCompressedUnavailable
+    ) {
+      const insightPath = path.join(stagingDirectory, INSIGHT_FILENAME);
+      const compression = await prepareCompressedEntry({
+        stagingDirectory,
+        logicalSnapshot: stagedArtifact,
+        platform,
+        schema1Manifest,
+        insightBytes: pathExists(insightPath)
+          ? fs.lstatSync(insightPath).size
+          : 0,
+        ...(options.codec === undefined ? {} : { codec: options.codec }),
+      });
+      if (compression.status === "compressed") {
+        manifest = compression.manifest;
+        fs.rmSync(logicalDirectory, { recursive: true, force: true });
+      } else {
+        console.warn(
+          `Compression unavailable; storing the ${platform} artifact normally (${compression.reason})`
+        );
+      }
+    }
+    if (manifest.schemaVersion === 1) {
+      fs.renameSync(stagedArtifact, path.join(stagingDirectory, artifactName));
+      fs.rmSync(logicalDirectory, { recursive: true, force: true });
+      fs.rmSync(
+        path.join(stagingDirectory, getCompressedArtifactName(platform)),
+        {
+          force: true,
+        }
+      );
+    }
     writeManifest(stagingDirectory, manifest);
 
     const stagedValidation = validateEntry(
@@ -424,9 +476,82 @@ export const uploadCacheEntry = async (
       );
     }
 
-    fs.renameSync(stagingDirectory, entryDirectory);
+    if (pathExists(entryDirectory)) {
+      ensureManagedDirectory(paths.providerRoot, paths.trashRoot);
+      replacementTombstone = path.join(
+        paths.trashRoot,
+        `${platform}-${entryId}-replacement-${crypto.randomUUID()}`
+      );
+      const restoreDirectory = getRestoreDirectory(paths, platform, entryId);
+      if (pathExists(restoreDirectory)) {
+        assertManagedDirectory(
+          paths.providerRoot,
+          path.dirname(restoreDirectory)
+        );
+        replacementRestoreTombstone = path.join(
+          paths.trashRoot,
+          `${platform}-${entryId}-restore-replacement-${crypto.randomUUID()}`
+        );
+        fs.renameSync(restoreDirectory, replacementRestoreTombstone);
+      }
+      try {
+        fs.renameSync(entryDirectory, replacementTombstone);
+      } catch (error) {
+        if (
+          replacementRestoreTombstone &&
+          pathExists(replacementRestoreTombstone) &&
+          !pathExists(restoreDirectory)
+        ) {
+          fs.renameSync(replacementRestoreTombstone, restoreDirectory);
+          replacementRestoreTombstone = null;
+        }
+        throw error;
+      }
+    }
+    try {
+      fs.renameSync(stagingDirectory, entryDirectory);
+    } catch (error) {
+      if (
+        replacementTombstone &&
+        pathExists(replacementTombstone) &&
+        !pathExists(entryDirectory)
+      ) {
+        fs.renameSync(replacementTombstone, entryDirectory);
+        replacementTombstone = null;
+      }
+      const restoreDirectory = getRestoreDirectory(paths, platform, entryId);
+      if (
+        replacementRestoreTombstone &&
+        pathExists(replacementRestoreTombstone) &&
+        !pathExists(restoreDirectory)
+      ) {
+        fs.renameSync(replacementRestoreTombstone, restoreDirectory);
+        replacementRestoreTombstone = null;
+      }
+      throw error;
+    }
     stagingDirectory = null;
-    return path.join(entryDirectory, artifactName);
+    if (replacementTombstone) {
+      fs.rmSync(replacementTombstone, { recursive: true, force: true });
+      replacementTombstone = null;
+    }
+    if (replacementRestoreTombstone) {
+      fs.rmSync(replacementRestoreTombstone, {
+        recursive: true,
+        force: true,
+      });
+      replacementRestoreTombstone = null;
+    }
+    try {
+      touchAccessRecord(paths.accessRoot, entryId, platform, {
+        providerRoot: paths.providerRoot,
+      });
+    } catch (error) {
+      console.warn("Could not create cache access metadata", error);
+    }
+    return manifest.schemaVersion === 1
+      ? path.join(entryDirectory, artifactName)
+      : path.join(entryDirectory, manifest.payload.relativePath);
   } finally {
     if (stagingDirectory) {
       fs.rmSync(stagingDirectory, { recursive: true, force: true });

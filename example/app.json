@@ -32,7 +32,16 @@
       "expo-status-bar"
     ],
     "buildCacheProvider": {
-      "plugin": "eas-local-cache"
+      "plugin": "eas-local-cache",
+      "options": {
+        "maxSize": "20GB",
+        "maxEntries": 50,
+        "retentionDays": 14,
+        "autoPrune": true,
+        "toolchain": "off",
+        "compression": "off",
+        "lan": "off"
+      }
     },
     "experiments": {
       "typedRoutes": true,

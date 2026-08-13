@@ -10,6 +10,14 @@ export type CachePaths = {
   stagingRoot: string;
   locksRoot: string;
   quarantineRoot: string;
+  accessRoot: string;
+  eventsRoot: string;
+  stateRoot: string;
+  trashRoot: string;
+  restoresRoot: string;
+  restoreStagingRoot: string;
+  transferStagingRoot: string;
+  transferLocksRoot: string;
 };
 
 export const getCachePaths = (projectRoot: string): CachePaths => {
@@ -23,6 +31,14 @@ export const getCachePaths = (projectRoot: string): CachePaths => {
     stagingRoot: path.join(providerRoot, "staging"),
     locksRoot: path.join(providerRoot, "locks"),
     quarantineRoot: path.join(providerRoot, "quarantine"),
+    accessRoot: path.join(providerRoot, "access"),
+    eventsRoot: path.join(providerRoot, "events"),
+    stateRoot: path.join(providerRoot, "state"),
+    trashRoot: path.join(providerRoot, "trash"),
+    restoresRoot: path.join(providerRoot, "restores"),
+    restoreStagingRoot: path.join(providerRoot, "restores", "staging"),
+    transferStagingRoot: path.join(providerRoot, "transfer-staging"),
+    transferLocksRoot: path.join(providerRoot, "transfer-locks"),
   };
 };
 
@@ -47,6 +63,17 @@ export const getArtifactName = (
   platform: CachePlatform
 ): "artifact.app" | "artifact.apk" =>
   platform === "ios" ? "artifact.app" : "artifact.apk";
+
+export const getCompressedArtifactName = (
+  platform: CachePlatform
+): "artifact.app.zst" | "artifact.apk.zst" =>
+  platform === "ios" ? "artifact.app.zst" : "artifact.apk.zst";
+
+export const getRestoreDirectory = (
+  paths: CachePaths,
+  platform: CachePlatform,
+  entryId: string
+): string => path.join(paths.restoresRoot, platform, entryId);
 
 export const getLegacyArtifactPath = (
   paths: CachePaths,

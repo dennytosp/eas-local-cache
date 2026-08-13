@@ -6,6 +6,8 @@ package's local-first, zero-account positioning.
 
 ## Milestone 1: Reliable Cache
 
+Status: implemented in pull request #18.
+
 - Versioned cache entries with a manifest and integrity digest
 - Atomic publication from a staging directory
 - Writer locking and stale-lock recovery
@@ -14,12 +16,16 @@ package's local-first, zero-account positioning.
 
 ## Milestone 2: Self-Managing Cache
 
+Status: implemented on `feat/cache-inspector`.
+
 - `list`, `stats`, `doctor`, and `prune` CLI commands
 - Explicit size, entry-count, and retention limits
 - LRU cleanup based on library-owned access metadata
 - Dry-run output and protection for active entries
 
 ## Milestone 3: Explainable Cache
+
+Status: implemented on `feat/explain-cache-miss`.
 
 - Persist comparable fingerprint input snapshots
 - Compare a miss with the closest compatible previous entry
@@ -28,12 +34,25 @@ package's local-first, zero-account positioning.
 
 ## Milestone 4: Environment-Safe Cache
 
+Status: implemented on `feat/environment-safe-cache`.
+
 - Derive a storage key from Expo's fingerprint plus relevant run options
 - Add carefully selected Xcode, SDK, JDK, Gradle, and architecture compatibility
   signals
 - Keep strict toolchain keying opt-in where compatibility is uncertain
 
-## Milestone 5: Trusted LAN Cache
+## Milestone 5: Storage Efficiency
+
+Status: implemented on `feat/compressed-cache-storage`.
+
+- Optional zstd compression for artifacts at rest
+- Bounded, atomic restore staging for Expo-compatible artifact paths
+- Compression savings visible in Cache Inspector output
+- Automatic fallback when zstd is unavailable or compressed data is damaged
+
+## Milestone 6: Trusted LAN Cache
+
+Status: implemented on `feat/trusted-lan-cache`.
 
 - Opt-in `serve` and `pair` workflow instead of ambient peer trust
 - Authenticated peer discovery and transfer

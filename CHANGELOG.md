@@ -19,15 +19,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Repository guidance, cache correctness rules, and a milestone roadmap for
   cache inspection, retention, explainable misses, toolchain-safe keys, and
   trusted LAN sharing.
+- A Cache Inspector CLI with `stats`, `list`, `doctor`, and `prune` commands,
+  including JSON output and a non-mutating prune preview.
+- Atomic last-access metadata and automatic TTL/LRU cleanup with configurable
+  size and entry-count soft caps.
+- Privacy-safe Expo fingerprint snapshots and evidence-backed cache-miss
+  explanations without persisting raw config or source contents.
+- Bounded per-resolve telemetry with retained hit rate, lookup duration, and a
+  conservative artifact-timestamp estimate of native build time avoided.
+- Versioned environment-aware identities that separate build profiles,
+  Xcode/Simulator SDKs, JDK/Gradle versions, and Android target ABIs.
+- Safe, strict, and compatibility-off toolchain modes plus a privacy-preserving
+  optional manual environment key.
+- Opt-in zstd compression for Android APKs and deterministic iOS app-tree
+  archives, with bounded codec operations and verified round trips before
+  publication.
+- Atomic, reusable restore directories for compressed entries, including
+  integrity validation, corruption quarantine, and uncompressed fallback when
+  a decoder or sufficient temporary disk space is unavailable.
+- Compression accounting in Cache Inspector list and stats output, plus restore
+  awareness in automatic and manual cleanup.
+- Opt-in trusted LAN sharing with pinned TLS, explicit one-use pairing,
+  per-peer authentication and revocation, and checksum-verified atomic local
+  promotion.
 
 ### Changed
 
+- Toolchain-aware cache identities are now opt-in. The default `toolchain`
+  mode is `off`; projects can select `safe` or `strict` when environment-level
+  cache separation is required.
 - Dependabot updates now skip npm publishing by default. Explicit package
   version increases publish after required CI, while version decreases are
   rejected.
 - New cache uploads use the versioned `.expo/cache/eas-local-cache/v1` layout.
   Existing flat `.apk` and `.app` entries remain readable as unverified legacy
   cache entries.
+- Cache uploads now default to a 20 GiB, 50-entry, 14-day retention policy and
+  clean expired quarantine, staging, trash, and least-recently-used entries
+  without failing the native build.
 
 ## [1.0.4] - 2026-08-11
 

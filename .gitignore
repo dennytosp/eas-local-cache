@@ -7,9 +7,6 @@ dist
 build
 *.tgz
 
-# Local design artifacts must never be committed.
-docs/superpowers/specs/
-
 # code coverage
 coverage
 *.lcov
@@ -19,3 +16,6 @@ coverage
 
 *.lock
 !bun.lock
+
+# Local agent design artifacts. Product documentation belongs under docs/.
+docs/superpowers/specs/

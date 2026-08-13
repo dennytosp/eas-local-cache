@@ -2,72 +2,46 @@
 
 [![CI](https://github.com/dennytosp/eas-local-cache/actions/workflows/ci.yml/badge.svg)](https://github.com/dennytosp/eas-local-cache/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/eas-local-cache.svg)](https://www.npmjs.com/package/eas-local-cache)
-[![npm downloads](https://img.shields.io/npm/dm/eas-local-cache.svg)](https://www.npmjs.com/package/eas-local-cache)
-[![TypeScript](https://img.shields.io/badge/types-included-blue.svg)](./src/index.ts)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
-[![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](./CONTRIBUTING.md)
 
-A lightweight build cache provider that makes repeated local Expo builds fast.
-When the project fingerprint has not changed, Expo reuses the cached native app
-instead of compiling it again.
+Reuse native `.app` and `.apk` artifacts for repeated local Expo builds.
 
-- **Fast local rebuilds** with fingerprint-based cache hits
-- **iOS and Android support** for `.app` bundles and `.apk` files
-- **Fully local storage** with no upload, account, or external service
-- **Project-scoped caching** that works from subdirectories and monorepos
-- **Atomic and self-healing entries** that reject partial or corrupted builds
-- **Typed TypeScript implementation** with no runtime changes to your app
+```text
+First expo run   → native build → save artifact
+Same fingerprint → cache hit    → skip Xcode/Gradle compilation
+Changed input    → cache miss   → build and save a new artifact
+```
 
----
-
-https://github.com/user-attachments/assets/bc7c09ad-333e-4043-a52c-667c3919668d
-
----
+This package is local-first, requires no EAS account, and is never imported by
+the React Native application.
 
 ## Requirements
 
-- Node.js 18 or newer
-- An Expo project with a version of Expo CLI that supports
-  `buildCacheProvider`
-- Xcode for iOS Simulator builds or the Android SDK for Android builds
+| Requirement | Notes |
+| --- | --- |
+| Node.js | 18 or newer |
+| Project | Expo project whose CLI supports `buildCacheProvider` |
+| Commands | `npx expo run:ios` or `npx expo run:android` |
+| iOS | macOS, Xcode, and an iOS Simulator build |
+| Android | JDK and Android SDK required by `expo run:android` |
 
-This package only participates in local native builds. It is not imported by
-your application at runtime.
+Supported project types:
 
-## Installation
+| Project/workflow | Supported? |
+| --- | ---: |
+| Expo managed or prebuild | Yes |
+| Bare project using Expo CLI `expo run:*` | Yes |
+| Pure React Native CLI `react-native run-*` | No |
+| `eas build` or `eas build --local` | No |
+| Physical iOS device build | No; Expo only invokes this provider for Simulator builds |
 
-Choose your preferred package manager:
+## Install
 
 ```bash
-# npm
 npm install --save-dev eas-local-cache
-
-# yarn
-yarn add --dev eas-local-cache
-
-# pnpm
-pnpm add --save-dev eas-local-cache
-
-# bun
-bun add --dev eas-local-cache
 ```
 
-## Quick Start
-
-Add the provider to your `app.config.ts`:
-
-```typescript
-import type { ConfigContext, ExpoConfig } from "expo/config";
-
-export default ({ config }: ConfigContext): ExpoConfig => ({
-  ...config,
-  buildCacheProvider: {
-    plugin: "eas-local-cache",
-  },
-});
-```
-
-Or use `app.json`:
+Add the provider to `app.json`:
 
 ```json
 {
@@ -79,140 +53,189 @@ Or use `app.json`:
 }
 ```
 
-> [!IMPORTANT]
-> Use the top-level `buildCacheProvider` field. The older
-> `experiments.buildCacheProvider` field is deprecated in current Expo
-> releases.
-
-Run your app as usual:
+Then run Expo normally:
 
 ```bash
 npx expo run:ios
-# or
 npx expo run:android
 ```
 
-The first run compiles the native app and stores its artifact. A later run with
-the same project fingerprint restores that artifact and launches it without
-recompiling.
+The first run builds and caches the native artifact. A later run with the same
+fingerprint uses that artifact instead of compiling native code again.
 
-## How It Works
+## Options
 
-1. Expo calculates a fingerprint from the native build inputs.
-2. `eas-local-cache` derives a safe cache identity from the platform and
-   fingerprint, then validates the matching entry in `<projectRoot>/.expo/cache`.
-3. On a cache hit, Expo installs and launches the stored artifact.
-4. On a cache miss, Expo builds normally. The successful artifact is copied to
-   a staging entry, checksummed, and atomically published for the next run.
+All options are optional:
 
-Concurrent builds for the same fingerprint coordinate through a per-entry lock.
-Incomplete staging data is never used, and a versioned entry that fails its
-manifest or integrity checks is moved to quarantine and treated as a cache miss.
+```json
+{
+  "expo": {
+    "buildCacheProvider": {
+      "plugin": "eas-local-cache",
+      "options": {
+        "maxSize": "20GB",
+        "maxEntries": 50,
+        "retentionDays": 14,
+        "autoPrune": true,
+        "toolchain": "off",
+        "compression": "off",
+        "lan": "off"
+      }
+    }
+  }
+}
+```
 
-The cache is resolved from the project root supplied by Expo, not the current
-working directory. This keeps caches isolated when commands are run from a
-subdirectory, monorepo root, or with a custom project root.
+| Option | Type / values | Default | Purpose |
+| --- | --- | ---: | --- |
+| `maxSize` | size, bytes, or `null` | `"20GB"` | Maximum managed cache size. `null` disables this limit. |
+| `maxEntries` | non-negative integer or `null` | `50` | Maximum cached builds. `null` disables this limit. |
+| `retentionDays` | non-negative number or `null` | `14` | Remove entries unused beyond this age. `null` disables expiry. |
+| `autoPrune` | boolean | `true` | Apply TTL, LRU, size, and entry limits automatically. |
+| `toolchain` | `"off"`, `"safe"`, `"strict"` | `"off"` | Optionally separate cache entries by build environment. |
+| `environmentKey` | string | unset | Add a project-defined native build context to the cache identity. |
+| `compression` | `"off"`, `"zstd"` | `"off"` | Compress cached artifacts at rest. |
+| `lan` | `"off"`, `"read"`, `"read-write"` | `"off"` | Share matching entries with explicitly paired peers. |
 
-## Cache Storage
+Size suffixes use binary units: `KB`, `MB`, `GB`, and `TB`.
 
-Versioned artifacts are stored under `.expo/cache/eas-local-cache/v1`:
+### `toolchain`
 
-| Path          | Purpose                                       |
-| ------------- | --------------------------------------------- |
-| `entries/`    | Immutable platform artifacts and manifests    |
-| `staging/`    | Incomplete uploads, never used for cache hits |
-| `locks/`      | Per-entry writer coordination                 |
-| `quarantine/` | Invalid entries retained for diagnosis        |
+| Value | Behavior |
+| --- | --- |
+| `off` | Use Expo's fingerprint. Best hit rate and default Expo compatibility. |
+| `safe` | Also separate by build profile and primary Xcode/SDK/JDK/Gradle/ABI signals. |
+| `strict` | Add more exact toolchain versions for stronger environment isolation. |
 
-Each entry contains `artifact.app` or `artifact.apk` plus `manifest.json`. The
-directory name is a SHA-256 cache identity, so fingerprint values never become
-raw filesystem paths. Flat `ios_<fingerprint>.app` and
-`android_<fingerprint>.apk` entries created by earlier releases remain readable
-for backward compatibility but are reported as unverified legacy entries.
+Use `safe` or `strict` when artifacts built by different toolchains must not
+share a cache entry. These modes improve correctness, not hit rate.
 
-The directory is local to each project and should not be committed to source
-control.
+Use `environmentKey` when a custom environment value changes native output but
+is not represented by Expo's fingerprint:
 
-## Limitations
+```js
+options: {
+  environmentKey: process.env.NATIVE_FLAVOR ?? "default"
+}
+```
 
-- The provider is used only by local `npx expo run:ios` and
-  `npx expo run:android` commands.
-- `eas build`, including `eas build --local`, does not invoke this provider.
-- Expo skips build cache providers for physical iOS device builds. Only iOS
-  Simulator builds participate in caching.
-- Cache artifacts stay on the current machine; this package does not share them
-  with teammates or CI runners.
+Only its SHA-256 digest is stored.
+
+### `compression`
+
+`zstd` requires either Node's built-in zstd codec or a `zstd` executable on
+`PATH`. If compression is unavailable, unsafe, or does not save space, the
+artifact is cached uncompressed. A usable native build is never failed because
+compression failed.
+
+### `lan`
+
+| Value | Behavior |
+| --- | --- |
+| `off` | Local cache only. |
+| `read` | Download matching entries from paired peers after a local miss. |
+| `read-write` | Download and upload matching entries to paired peers. |
+
+LAN sharing is direct peer-to-peer, not cloud storage. Peers must be reachable
+on the same LAN or a routed VPN. Existing local entries continue to work
+offline.
+
+Start a server and open a one-use pairing window:
+
+```bash
+npx eas-local-cache serve \
+  --host 0.0.0.0 \
+  --advertise-host 192.168.1.20 \
+  --pairing \
+  --allow-write
+```
+
+On the other machine:
+
+```bash
+npx eas-local-cache pair
+npx eas-local-cache peers --check
+```
+
+Pairing uses pinned TLS and per-peer authentication. If a peer is offline or a
+transfer fails, Expo continues with the local cache or a normal native build.
+
+## What happens on a cache miss?
+
+The build continues normally. The provider can print a short possible cause,
+such as:
+
+```text
+Possible cause: Expo config or config plugins changed
+Possible cause: native dependencies or autolinking changed
+Possible cause: build configuration changed
+```
+
+After a successful build, the new artifact is checksummed and atomically
+published. Partial or corrupt entries are never returned; they are quarantined
+and treated as misses.
+
+## Cache Inspector
+
+| Command | Purpose |
+| --- | --- |
+| `npx eas-local-cache stats` | Size, entry count, hit rate, and estimated time saved. |
+| `npx eas-local-cache list` | List cached builds, platform, age, size, and encoding. |
+| `npx eas-local-cache doctor` | Validate manifests, artifacts, metadata, and LAN state. |
+| `npx eas-local-cache doctor --deep` | Also verify compressed payload restoration. |
+| `npx eas-local-cache prune --dry-run` | Preview cleanup. |
+| `npx eas-local-cache prune` | Remove entries using configured or supplied limits. |
+
+Add `--json` for machine-readable output and `--project-root <path>` when run
+outside the Expo project directory.
+
+Cache data is stored under:
+
+```text
+<projectRoot>/.expo/cache/eas-local-cache/
+```
+
+Do not commit this directory.
+
+## Important behavior
+
+- Local cache does not depend on Wi-Fi, IP address, or a running LAN server.
+- LAN is checked only after a local miss.
+- Cache entries are project-scoped; a second clone has a separate cache.
+- Changing native dependencies, Expo config, build inputs, or an enabled
+  toolchain identity creates a miss and a new entry.
+- Cleanup protects active and recently returned entries.
+- Cache, telemetry, compression, and LAN failures fail open: Expo performs a
+  normal native build instead of failing the app build.
 
 ## Troubleshooting
 
-### The build never hits the cache
+**No cache hit**
 
-- Confirm `buildCacheProvider` is not nested under `experiments`.
-- Check that `.expo/cache` exists in the Expo project root.
-- Make sure the native build inputs have not changed. A changed fingerprint is
-  expected to produce a cache miss.
-- Look for `Cache hit` or `Cache miss` in the Expo CLI output.
+- Confirm `buildCacheProvider` is under `expo`, not `experiments`.
+- Confirm the command is `expo run:ios` or `expo run:android`.
+- Check the CLI output for `Cache miss` and `Possible cause`.
+- Run `npx eas-local-cache doctor`.
 
-### Clear the local cache
-
-Delete the project cache and run the build again:
+**Clear only this provider's cache**
 
 ```bash
-rm -rf .expo/cache
+rm -rf .expo/cache/eas-local-cache
 ```
 
-### A cached artifact is invalid
+## Development
 
-Versioned artifacts are verified before every cache hit. Invalid entries are
-quarantined automatically and Expo continues with a normal rebuild. If the
-problem repeats, clear `.expo/cache` and check that the project directory is
-writable and has enough available disk space.
-
-## Example App
-
-The [`example`](./example) Expo app uses HeroUI Native and Uniwind and links the
-current checkout through a local package dependency. It is the end-to-end
-fixture for verifying a real miss, upload, and subsequent hit:
+The [`example`](./example) Expo app is the native end-to-end fixture.
 
 ```bash
-bun run build
-bun install --cwd example
-bun run --cwd example ios
-bun run --cwd example ios
-```
-
-Use an iOS Simulator, or replace `ios` with `android` after starting an
-Android emulator. Run `bun run example:check` for the static integration checks.
-
-## Contributing
-
-Bug reports, documentation fixes, and cache-correctness improvements are
-welcome.
-
-```bash
-git clone https://github.com/dennytosp/eas-local-cache.git
-cd eas-local-cache
 bun install
-
+bun run format:check
+bun run lint
 bun run typecheck
 bun test
 bun run build
+bun run example:check
 ```
 
-These are the core validation commands. CI also checks formatting, lint rules,
-the release version, and the published package contents on Ubuntu and macOS.
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for the full development guide and
-[CODE_OF_CONDUCT.md](./CODE_OF_CONDUCT.md) for community expectations.
-
-- Found a bug? [Open an issue](https://github.com/dennytosp/eas-local-cache/issues/new?template=bug_report.yml)
-- Have a usage question? [Start a discussion](https://github.com/dennytosp/eas-local-cache/discussions)
-- Found a security issue? Read [SECURITY.md](./SECURITY.md) and please do not
-  open a public issue
-
-## Changelog
-
-See [CHANGELOG.md](./CHANGELOG.md).
-
-## License
-
-[MIT](./LICENSE) © Phong Dinh
+See [CONTRIBUTING.md](./CONTRIBUTING.md),
+[SECURITY.md](./SECURITY.md), and [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md).
