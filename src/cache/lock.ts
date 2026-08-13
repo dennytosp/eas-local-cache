@@ -15,6 +15,14 @@ type LockOwner = {
   createdAt: string;
 };
 
+export type EntryLockInspection = {
+  directory: string;
+  exists: boolean;
+  owner: LockOwner | null;
+  ageMs: number | null;
+  stale: boolean;
+};
+
 type AcquireLockOptions = {
   maxWaitMs?: number;
   retryIntervalMs?: number;
@@ -60,11 +68,12 @@ const isProcessAlive = (pid: number): boolean => {
 
 const isStale = (
   lockDirectory: string,
-  foreignHostStaleMs: number
+  foreignHostStaleMs: number,
+  nowMs = Date.now()
 ): boolean => {
   const owner = readOwner(lockDirectory);
   const stats = fs.statSync(lockDirectory);
-  const ageMs = Date.now() - stats.mtimeMs;
+  const ageMs = nowMs - stats.mtimeMs;
 
   if (!owner) {
     return ageMs > foreignHostStaleMs;
@@ -75,6 +84,63 @@ const isStale = (
   }
 
   return ageMs > foreignHostStaleMs;
+};
+
+const assertSafeLockName = (entryId: string): void => {
+  if (!/^(?:[a-f0-9]{64}|maintenance)$/.test(entryId)) {
+    throw new Error("Invalid cache lock name");
+  }
+};
+
+export const getEntryLockDirectory = (
+  locksRoot: string,
+  entryId: string
+): string => {
+  assertSafeLockName(entryId);
+  return path.join(locksRoot, `${entryId}.lock`);
+};
+
+export const inspectEntryLock = (
+  locksRoot: string,
+  entryId: string,
+  options: { foreignHostStaleMs?: number; nowMs?: number } = {}
+): EntryLockInspection => {
+  const directory = getEntryLockDirectory(locksRoot, entryId);
+  try {
+    const stats = fs.lstatSync(directory);
+    if (stats.isSymbolicLink() || !stats.isDirectory()) {
+      return {
+        directory,
+        exists: true,
+        owner: null,
+        ageMs: Math.max(0, (options.nowMs ?? Date.now()) - stats.mtimeMs),
+        stale: false,
+      };
+    }
+    const owner = readOwner(directory);
+    return {
+      directory,
+      exists: true,
+      owner,
+      ageMs: Math.max(0, (options.nowMs ?? Date.now()) - stats.mtimeMs),
+      stale: isStale(
+        directory,
+        options.foreignHostStaleMs ?? 10 * 60_000,
+        options.nowMs
+      ),
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return {
+        directory,
+        exists: false,
+        owner: null,
+        ageMs: null,
+        stale: false,
+      };
+    }
+    throw error;
+  }
 };
 
 const breakStaleLock = (lockDirectory: string): boolean => {
@@ -103,7 +169,7 @@ export const acquireEntryLock = async (
   const retryIntervalMs = options.retryIntervalMs ?? 100;
   const foreignHostStaleMs = options.foreignHostStaleMs ?? 10 * 60_000;
   const deadline = Date.now() + maxWaitMs;
-  const lockDirectory = path.join(locksRoot, `${entryId}.lock`);
+  const lockDirectory = getEntryLockDirectory(locksRoot, entryId);
 
   fs.mkdirSync(locksRoot, { recursive: true });
 

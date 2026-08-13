@@ -8,6 +8,8 @@ import * as os from "os";
 import * as path from "path";
 
 import plugin from "../src/index";
+import { removeAccessRecord, touchAccessRecord } from "../src/cache/access";
+import { acquireEntryLock, releaseEntryLock } from "../src/cache/lock";
 import { readManifest } from "../src/cache/manifest";
 import {
   getCachePaths,
@@ -287,6 +289,81 @@ describe("versioned uploads", () => {
       fs.rmSync(outside, { recursive: true, force: true });
     }
   });
+
+  it("automatically prunes the least recently used entry after upload", async () => {
+    const firstFingerprint = "auto-prune-first";
+    const first = await uploadBuildCache(
+      uploadProps(
+        "android",
+        firstFingerprint,
+        makeApk("auto-first.apk", "first")
+      ),
+      { maxSize: null, maxEntries: 1, retentionDays: null }
+    );
+    const paths = getCachePaths(projectRoot);
+    const firstEntryId = getEntryId("android", firstFingerprint);
+    removeAccessRecord(paths.accessRoot, firstEntryId, paths.providerRoot);
+    touchAccessRecord(paths.accessRoot, firstEntryId, "android", {
+      now: new Date("2020-01-01T00:00:00.000Z"),
+      leaseMs: 0,
+      providerRoot: paths.providerRoot,
+    });
+
+    const second = await uploadBuildCache(
+      uploadProps(
+        "android",
+        "auto-prune-second",
+        makeApk("auto-second.apk", "second")
+      ),
+      { maxSize: null, maxEntries: 1, retentionDays: null }
+    );
+
+    expect(first).not.toBeNull();
+    expect(second).not.toBeNull();
+    expect(fs.existsSync(first!)).toBe(false);
+    expect(fs.existsSync(second!)).toBe(true);
+  });
+
+  it("keeps a successful upload when cleanup options are invalid", async () => {
+    const cached = await uploadBuildCache(
+      uploadProps(
+        "android",
+        "invalid-cleanup-options",
+        makeApk("invalid-cleanup.apk")
+      ),
+      { maxSize: "not-a-size" }
+    );
+
+    expect(cached).not.toBeNull();
+    expect(fs.existsSync(cached!)).toBe(true);
+  });
+
+  it("does not return an artifact while its entry is locked for maintenance", async () => {
+    const fingerprint = "resolve-lock";
+    const cached = await uploadBuildCache(
+      uploadProps("android", fingerprint, makeApk("resolve-lock.apk")),
+      {}
+    );
+    const paths = getCachePaths(projectRoot);
+    const lock = await acquireEntryLock(
+      paths.locksRoot,
+      getEntryId("android", fingerprint)
+    );
+
+    expect(lock).not.toBeNull();
+    try {
+      expect(
+        await resolveBuildCache(resolveProps("android", fingerprint), {})
+      ).toBeNull();
+      expect(fs.existsSync(cached!)).toBe(true);
+    } finally {
+      releaseEntryLock(lock!);
+    }
+
+    expect(
+      await resolveBuildCache(resolveProps("android", fingerprint), {})
+    ).toBe(cached);
+  });
 });
 
 describe("self-healing resolution", () => {
@@ -454,6 +531,26 @@ describe("self-healing resolution", () => {
       await resolveBuildCache(resolveProps("android", "manifest"), {})
     ).toBeNull();
     expect(fs.existsSync(path.dirname(cached!))).toBe(false);
+  });
+
+  it("does not follow a symlinked manifest outside the cache entry", async () => {
+    const cached = await uploadBuildCache(
+      uploadProps("android", "manifest-link", makeApk("manifest-link.apk")),
+      {}
+    );
+    const entry = path.dirname(cached!);
+    const manifestPath = path.join(entry, "manifest.json");
+    const outsideManifest = path.join(projectRoot, "outside-manifest.json");
+    const outsideContents = fs.readFileSync(manifestPath, "utf8");
+    fs.writeFileSync(outsideManifest, outsideContents);
+    fs.unlinkSync(manifestPath);
+    fs.symlinkSync(outsideManifest, manifestPath);
+
+    expect(
+      await resolveBuildCache(resolveProps("android", "manifest-link"), {})
+    ).toBeNull();
+    expect(fs.readFileSync(outsideManifest, "utf8")).toBe(outsideContents);
+    expect(fs.existsSync(entry)).toBe(false);
   });
 });
 

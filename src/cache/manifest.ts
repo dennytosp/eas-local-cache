@@ -33,7 +33,20 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 
 export const readManifest = (entryDirectory: string): CacheManifest => {
   const manifestPath = path.join(entryDirectory, "manifest.json");
-  const parsed: unknown = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  const descriptor = fs.openSync(
+    manifestPath,
+    fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW
+  );
+  let contents: string;
+  try {
+    if (!fs.fstatSync(descriptor).isFile()) {
+      throw new Error("Cache manifest must be a regular file");
+    }
+    contents = fs.readFileSync(descriptor, "utf8");
+  } finally {
+    fs.closeSync(descriptor);
+  }
+  const parsed: unknown = JSON.parse(contents);
 
   if (!isRecord(parsed) || parsed.schemaVersion !== CACHE_SCHEMA_VERSION) {
     throw new Error("Unsupported or malformed cache manifest");
