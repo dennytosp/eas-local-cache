@@ -13,11 +13,12 @@ instead of compiling it again.
 
 - **Fast local rebuilds** with fingerprint-based cache hits
 - **iOS and Android support** for `.app` bundles and `.apk` files
-- **Fully local storage** with no upload, account, or external service
+- **Local-first storage** with no account or external service
 - **Project-scoped caching** that works from subdirectories and monorepos
 - **Atomic and self-healing entries** that reject partial or corrupted builds
 - **Automatic storage limits** with TTL and least-recently-used cleanup
 - **Opt-in zstd compression** with verified, atomic artifact restoration
+- **Opt-in trusted LAN sharing** between explicitly paired team machines
 - **Cache Inspector CLI** for capacity, entry, health, and prune operations
 - **Explainable cache misses** based on privacy-safe Expo fingerprint evidence
 - **Local hit-rate telemetry** with conservative estimated time saved
@@ -77,6 +78,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
       autoPrune: true,
       toolchain: "safe",
       compression: "zstd",
+      lan: "off",
     },
   },
 });
@@ -95,7 +97,8 @@ Or use `app.json`:
         "retentionDays": 14,
         "autoPrune": true,
         "toolchain": "safe",
-        "compression": "zstd"
+        "compression": "zstd",
+        "lan": "off"
       }
     }
   }
@@ -136,6 +139,41 @@ available and otherwise looks for the `zstd` command. A compressed upload is
 published only when it is smaller and round-trips to the original artifact.
 If no codec is available, disk space is insufficient, or the round-trip check
 fails, the successful native build is cached normally without compression.
+
+LAN sharing is also deliberately opt-in. Keep `lan: "off"` for local-only
+operation, use `"read"` to fetch from paired peers, or `"read-write"` to fetch
+and offer newly published entries. Pairing secrets and peer identities are
+managed by the CLI and never belong in Expo config.
+
+## Trusted LAN Cache
+
+On the machine that will serve a cache, run the foreground server and open a
+single-use pairing window:
+
+```bash
+npx eas-local-cache serve --host 0.0.0.0 --advertise-host 192.168.1.20 \
+  --pairing --allow-write
+```
+
+On another machine in the same Expo project, run `pair` and paste the URI into
+the non-echoing prompt:
+
+```bash
+npx eas-local-cache pair
+npx eas-local-cache peers --check
+```
+
+Then set `lan` to `"read"` or `"read-write"` in the provider options. Local
+entries are always checked first. A remote entry is downloaded over pinned TLS,
+authenticated with a revocable per-peer credential, verified against its
+manifest and checksums, and atomically published into the local cache before it
+is returned to Expo. If discovery, authentication, transfer, or the peer itself
+is unavailable, Expo simply continues with the normal local build.
+
+The server exposes exact cache identities only; it cannot list another
+project's cache. Discovery advertisements contain no project name, path,
+fingerprint, entry ID, token, or key. Use `npx eas-local-cache peers` to inspect
+trust, and `peers disable`, `peers enable`, or `peers revoke` to manage it.
 
 ## How It Works
 
@@ -207,17 +245,19 @@ subdirectory, monorepo root, or with a custom project root.
 
 Versioned artifacts are stored under `.expo/cache/eas-local-cache/v1`:
 
-| Path          | Purpose                                       |
-| ------------- | --------------------------------------------- |
-| `entries/`    | Immutable platform artifacts and manifests    |
-| `staging/`    | Incomplete uploads, never used for cache hits |
-| `restores/`   | Atomic materializations of compressed entries |
-| `locks/`      | Per-entry writer coordination                 |
-| `quarantine/` | Invalid entries retained for diagnosis        |
-| `access/`     | Atomic last-used records and short leases     |
-| `events/`     | Bounded, private resolve telemetry            |
-| `state/`      | Last valid cleanup policy                     |
-| `trash/`      | Atomic removal tombstones                     |
+| Path                | Purpose                                       |
+| ------------------- | --------------------------------------------- |
+| `entries/`          | Immutable platform artifacts and manifests    |
+| `staging/`          | Incomplete uploads, never used for cache hits |
+| `restores/`         | Atomic materializations of compressed entries |
+| `locks/`            | Per-entry writer coordination                 |
+| `quarantine/`       | Invalid entries retained for diagnosis        |
+| `access/`           | Atomic last-used records and short leases     |
+| `events/`           | Bounded, private resolve telemetry            |
+| `state/`            | Last valid cleanup policy                     |
+| `trash/`            | Atomic removal tombstones                     |
+| `transfer-staging/` | Incomplete authenticated LAN transfers        |
+| `transfer-locks/`   | Per-entry LAN transfer coordination           |
 
 An uncompressed entry contains `artifact.app` or `artifact.apk`. A compressed
 entry instead contains `artifact.app.zst` or `artifact.apk.zst` and a versioned
@@ -238,8 +278,8 @@ control.
 - `eas build`, including `eas build --local`, does not invoke this provider.
 - Expo skips build cache providers for physical iOS device builds. Only iOS
   Simulator builds participate in caching.
-- Cache artifacts stay on the current machine; this package does not share them
-  with teammates or CI runners.
+- LAN sharing requires both machines to be reachable while the foreground
+  server is running. It does not traverse NAT or provide cloud persistence.
 
 ## Troubleshooting
 

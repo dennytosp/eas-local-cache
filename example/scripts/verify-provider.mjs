@@ -93,6 +93,13 @@ if (configWithCompression.buildCacheProvider?.options?.compression !== "zstd") {
   throw new Error("Dynamic Expo config did not enable the compression oracle");
 }
 
+const configWithLan = evaluateConfig({
+  EAS_LOCAL_CACHE_TEST_LAN: "read-write",
+});
+if (configWithLan.buildCacheProvider?.options?.lan !== "read-write") {
+  throw new Error("Dynamic Expo config did not enable the LAN cache oracle");
+}
+
 if (providerPackageJson.bin?.["eas-local-cache"] !== "build/cli-bin.js") {
   throw new Error("The local package does not expose the Cache Inspector CLI");
 }
@@ -104,7 +111,8 @@ if (
   configuredOptions?.retentionDays !== 14 ||
   configuredOptions?.autoPrune !== true ||
   configuredOptions?.toolchain !== "safe" ||
-  configuredOptions?.compression !== "off"
+  configuredOptions?.compression !== "off" ||
+  configuredOptions?.lan !== "off"
 ) {
   throw new Error("The example cleanup policy does not match the documented defaults");
 }
