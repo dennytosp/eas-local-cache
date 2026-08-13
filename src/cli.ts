@@ -6,6 +6,7 @@ import * as path from "path";
 import { inventoryCache } from "./cache/catalog";
 import { pruneCache } from "./cache/cleanup";
 import { doctorCache } from "./cache/doctor";
+import { scanResolveEvents, summarizeResolveEvents } from "./cache/events";
 import {
   formatSizeBytes,
   normalizeCacheOptions,
@@ -122,6 +123,20 @@ export const parseCliArguments = (
 const printJson = (value: unknown) =>
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 
+const formatDuration = (milliseconds: number): string => {
+  const seconds = Math.round(milliseconds / 1000);
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainingSeconds = seconds % 60;
+  return [
+    ...(hours > 0 ? [`${hours}h`] : []),
+    ...(minutes > 0 ? [`${minutes}m`] : []),
+    ...(remainingSeconds > 0 || (hours === 0 && minutes === 0)
+      ? [`${remainingSeconds}s`]
+      : []),
+  ].join(" ");
+};
+
 export const runCli = async (arguments_: string[]): Promise<number> => {
   try {
     const parsed = parseCliArguments(arguments_);
@@ -185,6 +200,15 @@ export const runCli = async (arguments_: string[]): Promise<number> => {
         catalog.paths.providerRoot,
         catalog.paths.stateRoot
       );
+      let telemetry;
+      try {
+        const scan = scanResolveEvents(catalog.paths.eventsRoot);
+        telemetry = summarizeResolveEvents(
+          scan.events.map(({ event }) => event)
+        );
+      } catch {
+        telemetry = summarizeResolveEvents([]);
+      }
       const output = {
         entryCount: catalog.entries.length,
         legacyEntryCount: catalog.legacyEntries.length,
@@ -197,8 +221,16 @@ export const runCli = async (arguments_: string[]): Promise<number> => {
         },
         usage: catalog.usage,
         policy,
-        hitRate: null,
-        estimatedTimeSavedMs: null,
+        hitRate: telemetry.hitRate,
+        estimatedTimeSavedMs:
+          telemetry.hits === telemetry.hitsWithoutEstimate
+            ? null
+            : telemetry.estimatedTimeSavedMs,
+        telemetry: {
+          scope: "recorded-retained-resolves",
+          ...telemetry,
+          invalidEventCount: catalog.telemetry.invalidEventCount,
+        },
         issues: catalog.issues,
       };
       if (parsed.json) {
@@ -217,9 +249,19 @@ export const runCli = async (arguments_: string[]): Promise<number> => {
           )}`
         );
         console.log(
-          "Hit rate: unavailable (event telemetry arrives in milestone 3)"
+          output.hitRate === null
+            ? "Hit rate: unavailable (no retained cache decisions)"
+            : `Hit rate: ${(output.hitRate * 100).toFixed(1)}% (${
+                telemetry.hits
+              } hits / ${telemetry.hits + telemetry.misses} decisions)`
         );
-        console.log("Estimated time saved: unavailable");
+        console.log(
+          output.estimatedTimeSavedMs === null
+            ? `Estimated time saved: unavailable (${telemetry.hitsWithoutEstimate} hits lacked timing data)`
+            : `Estimated time saved: ~${formatDuration(
+                output.estimatedTimeSavedMs
+              )} (${telemetry.hitsWithoutEstimate} hits lacked timing data)`
+        );
       }
       return catalog.issues.some((issue) => issue.severity === "error") ? 1 : 0;
     }

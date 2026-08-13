@@ -11,6 +11,7 @@ export type CachePaths = {
   locksRoot: string;
   quarantineRoot: string;
   accessRoot: string;
+  eventsRoot: string;
   stateRoot: string;
   trashRoot: string;
 };
@@ -27,6 +28,7 @@ export const getCachePaths = (projectRoot: string): CachePaths => {
     locksRoot: path.join(providerRoot, "locks"),
     quarantineRoot: path.join(providerRoot, "quarantine"),
     accessRoot: path.join(providerRoot, "access"),
+    eventsRoot: path.join(providerRoot, "events"),
     stateRoot: path.join(providerRoot, "state"),
     trashRoot: path.join(providerRoot, "trash"),
   };
