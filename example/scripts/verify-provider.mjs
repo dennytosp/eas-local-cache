@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 
@@ -32,10 +33,35 @@ if (configuredPlugin !== "eas-local-cache") {
   );
 }
 
-for (const method of ["resolveBuildCache", "uploadBuildCache"]) {
+for (const method of ["calculateFingerprintHash", "resolveBuildCache", "uploadBuildCache"]) {
   if (typeof provider?.[method] !== "function") {
     throw new TypeError(`The local provider does not export ${method}()`);
   }
+}
+
+const evaluateConfig = (salt) => {
+  const output = execFileSync(
+    process.execPath,
+    ["./node_modules/expo/bin/cli", "config", "--type", "public", "--json"],
+    {
+      cwd: new URL("..", import.meta.url),
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        ...(salt ? { EAS_LOCAL_CACHE_TEST_SALT: salt } : {}),
+      },
+    }
+  );
+  return JSON.parse(output);
+};
+
+const configWithoutSalt = evaluateConfig(null);
+const configWithSalt = evaluateConfig("non-secret-provider-verification");
+if (configWithoutSalt.extra?.easLocalCacheTestSalt !== undefined) {
+  throw new Error("The cache test salt must be omitted unless explicitly set");
+}
+if (configWithSalt.extra?.easLocalCacheTestSalt !== "non-secret-provider-verification") {
+  throw new Error("Dynamic Expo config did not expose the cache test salt");
 }
 
 if (providerPackageJson.bin?.["eas-local-cache"] !== "build/cli-bin.js") {

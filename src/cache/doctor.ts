@@ -2,6 +2,7 @@ import * as fs from "fs";
 
 import { inventoryCache, type CatalogIssue } from "./catalog";
 import { assertManagedDirectory } from "./filesystem";
+import { readInsight } from "./insight";
 import { validateEntry } from "./validation";
 
 export type DoctorReport = {
@@ -28,6 +29,25 @@ export const doctorCache = (projectRoot: string): DoctorReport => {
         path: entry.directory,
         message: validation.reason,
         severity: "error",
+      });
+    }
+    try {
+      const insight = readInsight(entry.directory);
+      if (
+        insight &&
+        (insight.entryId !== entry.entryId ||
+          insight.platform !== entry.platform ||
+          insight.fingerprintHash !== entry.fingerprintHash)
+      ) {
+        throw new Error("Cache insight identity does not match its entry");
+      }
+    } catch (error) {
+      issues.push({
+        code: "invalid-cache-insight",
+        path: `${entry.directory}/insight.json`,
+        message:
+          error instanceof Error ? error.message : "Cache insight is invalid",
+        severity: "warning",
       });
     }
   }
