@@ -45,6 +45,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Toolchain-aware cache identities are now opt-in. The default `toolchain`
+  mode is `off`; projects can select `safe` or `strict` when environment-level
+  cache separation is required.
 - Dependabot updates now skip npm publishing by default. Explicit package
   version increases publish after required CI, while version decreases are
   rejected.

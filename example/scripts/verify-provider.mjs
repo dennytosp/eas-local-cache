@@ -86,6 +86,13 @@ if (
   throw new Error("Dynamic Expo config did not expose the test environment key");
 }
 
+const configWithToolchain = evaluateConfig({
+  EAS_LOCAL_CACHE_TEST_TOOLCHAIN: "safe",
+});
+if (configWithToolchain.buildCacheProvider?.options?.toolchain !== "safe") {
+  throw new Error("Dynamic Expo config did not enable the toolchain oracle");
+}
+
 const configWithCompression = evaluateConfig({
   EAS_LOCAL_CACHE_TEST_COMPRESSION: "zstd",
 });
@@ -110,7 +117,7 @@ if (
   configuredOptions?.maxEntries !== 50 ||
   configuredOptions?.retentionDays !== 14 ||
   configuredOptions?.autoPrune !== true ||
-  configuredOptions?.toolchain !== "safe" ||
+  configuredOptions?.toolchain !== "off" ||
   configuredOptions?.compression !== "off" ||
   configuredOptions?.lan !== "off"
 ) {

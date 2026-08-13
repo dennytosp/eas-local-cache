@@ -28,6 +28,7 @@ run_build() {
     device_args=(--device "$EAS_LOCAL_CACHE_TEST_DEVICE")
   fi
   EAS_LOCAL_CACHE_TEST_ENVIRONMENT_KEY="$environment_key" \
+    EAS_LOCAL_CACHE_TEST_TOOLCHAIN="safe" \
     bunx expo "run:${platform}" "${device_args[@]}" \
       --no-bundler --no-install "$@" 2>&1 | tee "$log_dir/${label}.log"
 }

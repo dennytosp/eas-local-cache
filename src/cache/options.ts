@@ -52,7 +52,7 @@ export const DEFAULT_CACHE_POLICY: Readonly<NormalizedCachePolicy> =
 
 export const DEFAULT_ENVIRONMENT_OPTIONS: Readonly<NormalizedEnvironmentOptions> =
   Object.freeze({
-    toolchainMode: "safe",
+    toolchainMode: "off",
     environmentKeyDigest: null,
   });
 
