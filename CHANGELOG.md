@@ -7,11 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Versioned cache manifests with SHA-256 integrity checks for Android artifacts
+  and deterministic tree checks for iOS app bundles.
+- Atomic cache publication, per-entry writer locks, stale-lock recovery, and
+  corrupt-entry quarantine so interrupted or concurrent writes cannot be
+  returned as cache hits.
+- A HeroUI Native and Uniwind Expo example that links the local package and
+  provides repeatable iOS Simulator and Android emulator cache tests.
+- Repository guidance, cache correctness rules, and a milestone roadmap for
+  cache inspection, retention, explainable misses, toolchain-safe keys, and
+  trusted LAN sharing.
+
 ### Changed
 
 - Dependabot updates now skip npm publishing by default. Explicit package
   version increases publish after required CI, while version decreases are
   rejected.
+- New cache uploads use the versioned `.expo/cache/eas-local-cache/v1` layout.
+  Existing flat `.apk` and `.app` entries remain readable as unverified legacy
+  cache entries.
 
 ## [1.0.4] - 2026-08-11
 

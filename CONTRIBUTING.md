@@ -1,33 +1,26 @@
 # Contributing to eas-local-cache
 
-Thanks for your interest in improving the plugin. This document covers how to
-run it locally, what the checks are, and how releases work.
-
-By participating you agree to the [Code of Conduct](./CODE_OF_CONDUCT.md).
+Thanks for helping improve the plugin. By participating you agree to the
+[Code of Conduct](./CODE_OF_CONDUCT.md).
 
 ## What this project is
 
-`eas-local-cache` implements Expo's `BuildCacheProviderPlugin` interface. Expo
-CLI calls two functions:
+`eas-local-cache` implements Expo's `BuildCacheProviderPlugin` interface for
+local `npx expo run:ios` and `npx expo run:android` builds. Expo supplies the
+project root, platform, native-input fingerprint, and successful build path.
+The provider resolves or publishes a verified artifact below the project's
+`.expo/cache` directory.
 
-- `resolveBuildCache` — given a fingerprint hash and platform, return the path
-  to a cached artifact or `null`.
-- `uploadBuildCache` — given a freshly built artifact, copy it into the cache
-  and return where it landed.
-
-Everything lives in a single file, `src/index.ts`. Artifacts are stored under
-`.expo/cache` in the project root as `ios_<hash>.app` (a directory) or
-`android_<hash>.apk` (a file).
-
-Fingerprint hashes are computed by Expo, not by this plugin. If two builds you
-expect to match produce different hashes, that is upstream behaviour — see
-[Expo's build cache documentation](https://docs.expo.dev/guides/cache-builds-remotely/).
+It is not invoked by `eas build`, including `eas build --local`. Fingerprints
+are calculated by Expo; this package currently uses the supplied fingerprint as
+part of its storage identity.
 
 ## Prerequisites
 
-- [Bun](https://bun.sh) 1.1 or newer
-- Node.js 20 or newer (used by `npm pack` / publishing)
-- macOS if you want to exercise the `ditto` copy path; Linux falls back to `cp -R`
+- Bun 1.1 or newer
+- Node.js 18 or newer
+- macOS and Xcode for real iOS Simulator tests
+- Android SDK and an emulator for real Android tests
 
 ## Local setup
 
@@ -35,88 +28,84 @@ expect to match produce different hashes, that is upstream behaviour — see
 git clone https://github.com/dennytosp/eas-local-cache.git
 cd eas-local-cache
 bun install
+bun install --cwd example
 ```
 
-## The checks
+Read [AGENTS.md](./AGENTS.md) and the focused rules under `.agents/rules/`
+before changing cache behavior or the example app.
 
-These are exactly what CI runs on every pull request, on both Ubuntu and macOS:
+## Validation
 
-```bash
-bun run typecheck   # tsc --noEmit over src/ and test/
-bun test            # integration tests against a temporary project root
-bun run build       # tsc -> build/
-```
-
-### About the tests
-
-`test/plugin.test.ts` drives the real plugin against a real filesystem: it
-creates a temporary project root, `chdir`s into it *before* importing the module
-(the cache directory is resolved from `process.cwd()` at load time), then
-exercises cache misses, `.apk` file caching, `.app` bundle caching, overwrites,
-and full round trips.
-
-No mocking of `fs` — the tests would not catch a broken `ditto`/`cp` fallback
-otherwise, which is the part most likely to break across platforms.
-
-## Trying it in a real project
-
-The most useful manual test is a real Expo app:
+Run the complete static and filesystem-backed suite:
 
 ```bash
-cd eas-local-cache
+bun run format:check
+bun run lint
+bun run typecheck
+bun test
 bun run build
-bun link
-
-cd ../your-expo-app
-bun link eas-local-cache
+bun run example:check
 ```
 
-Then add the provider to `app.config.ts`:
+The provider tests use temporary project roots and real filesystem operations.
+They cover Android files, iOS app directories, manifests, integrity failures,
+quarantine, locks, concurrent writers, legacy entries, and project isolation.
 
-```typescript
-experiments: {
-  buildCacheProvider: {
-    plugin: 'eas-local-cache',
-  },
-}
+## Real native round trip
+
+The `example/` Expo Router app uses HeroUI Native and Uniwind and declares this
+checkout as `"eas-local-cache": "file:.."`. Build the provider before running
+the app:
+
+```bash
+bun run build
+cd example
+bun run verify:provider
 ```
 
-Run `npx expo run:ios` twice. The second run should print `Cache hit!` and skip
-the build. `rm -rf .expo/cache` resets it.
+Choose one platform and run the same native target twice:
+
+```bash
+bun run ios
+bun run ios
+```
+
+or, with an Android emulator running:
+
+```bash
+bun run android
+bun run android
+```
+
+The first run should log a cache miss and successful publication. The unchanged
+second run should log a cache hit and Expo's custom binary path. iOS physical
+devices do not participate in Expo build-cache providers.
 
 ## Pull requests
 
-1. Branch off `main`, e.g. `fix/stale-ios-bundle`.
-2. Keep the change focused.
-3. Run the three checks above.
-4. Fill in the PR template, including what you verified end to end.
-5. Add an entry to [CHANGELOG.md](./CHANGELOG.md) under `Unreleased`.
+1. Branch from `main` and keep the change focused.
+2. Add tests for every cache-format, recovery, concurrency, or keying change.
+3. Exercise the example app when native behavior changes.
+4. Add an entry to [CHANGELOG.md](./CHANGELOG.md) under `Unreleased`.
+5. Use an English conventional commit subject and complete the PR template.
 
-Commit messages use a gitmoji + short summary style
-(`:sparkles: Initialize | Expo builds local cache`), but this is not enforced.
+## Cache correctness
 
-## Things to be careful about
-
-- **Cache correctness beats cache hits.** A wrong artifact reused is far worse
-  than a rebuild. When in doubt, return `null`.
-- **Never delete outside `.expo/cache`.** `uploadBuildCache` removes an existing
-  destination before copying; keep that strictly scoped to the cache directory.
-- **Keep the dependency list empty.** The plugin runs inside the user's build,
-  and today ships zero runtime dependencies. Node's stdlib should be enough.
+- A false cache miss costs build time; a false hit can run the wrong native app.
+  Prefer correctness.
+- Derive all paths from Expo's `projectRoot`, never the current working
+  directory.
+- Never publish partial data. Stage, validate, and atomically rename entries.
+- Treat cache contents as untrusted and fail open to a normal Expo build.
+- Keep runtime dependencies minimal; Node's standard library is preferred.
+- Never delete outside the library-owned subtree of `.expo/cache`.
 
 ## Releasing
 
-Source pull requests normally leave the package version unchanged. After a
-merge into `main`, the default decision is to skip publishing when no
-`release:*` label is present. Use `release:patch`, `release:minor`, or
-`release:major` to publish, or explicitly increase `package.json.version` to
-publish that exact version without a label. Automation verifies the package,
-publishes it to npm, and creates the matching tag and GitHub Release.
+Source pull requests normally leave the package version unchanged. Release
+automation uses the `release:patch`, `release:minor`, or `release:major` label,
+or an explicit stable version increase. See [RELEASING.md](./RELEASING.md) for
+the complete process.
 
-Read [RELEASING.md](./RELEASING.md) for the complete rules and copy-pasteable
-`gh` commands for creating, applying, changing, and verifying release labels.
-
-## Questions
-
-Open a [Discussion](https://github.com/dennytosp/eas-local-cache/discussions)
-for usage questions, and an issue for bugs.
+For usage questions, start a GitHub Discussion. Use issues for reproducible
+bugs and feature proposals.

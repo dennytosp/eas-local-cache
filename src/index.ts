@@ -3,180 +3,63 @@ import {
   ResolveBuildCacheProps,
   UploadBuildCacheProps,
 } from "@expo/config";
-import * as child_process from "child_process";
-import * as fs from "fs";
-import * as path from "path";
 
-/**
- * Ensures the cache directory exists
- *
- * The directory is derived from the projectRoot Expo passes in, not from
- * process.cwd(). Those differ whenever the CLI is invoked from a subdirectory,
- * from a monorepo root, or with --project-root, and caching into the wrong
- * directory means silently never getting a cache hit.
- */
-const ensureCacheDir = (projectRoot: string) => {
-  const cacheDir = path.join(projectRoot, ".expo/cache");
-  if (!fs.existsSync(cacheDir)) {
-    fs.mkdirSync(cacheDir, { recursive: true });
-  }
-  return cacheDir;
-};
+import { resolveCacheEntry, uploadCacheEntry } from "./cache/store";
 
-/**
- * Gets the cache file path for a specific build based on fingerprint and platform
- */
-const getCacheFilePath = (
-  projectRoot: string,
-  fingerprintHash: string,
-  platform: string
-) => {
-  // For iOS, use .app extension, for Android use .apk
-  const extension = platform === "ios" ? ".app" : ".apk";
-  const filename = `${platform}_${fingerprintHash}${extension}`;
-  return path.join(ensureCacheDir(projectRoot), filename);
-};
-
-/**
- * Copy directories recursively using more reliable commands
- */
-const copyDirectory = (source: string, destination: string): boolean => {
-  try {
-    // Make parent directory if it doesn't exist
-    const destDir = path.dirname(destination);
-    if (!fs.existsSync(destDir)) {
-      fs.mkdirSync(destDir, { recursive: true });
-    }
-
-    // If destination already exists, remove it
-    if (fs.existsSync(destination)) {
-      if (fs.statSync(destination).isDirectory()) {
-        fs.rmSync(destination, { recursive: true, force: true });
-      } else {
-        fs.unlinkSync(destination);
-      }
-    }
-
-    // Try ditto first (perfect for macOS app bundles)
-    const dittoResult = child_process.spawnSync(
-      "ditto",
-      [source, destination],
-      {
-        stdio: "inherit",
-      }
-    );
-
-    if (dittoResult.status === 0) {
-      return true;
-    }
-
-    // Fallback to cp -R (which also works well on macOS)
-    const cpResult = child_process.spawnSync(
-      "cp",
-      ["-R", source, destination],
-      {
-        stdio: "inherit",
-      }
-    );
-
-    if (cpResult.status === 0) {
-      return true;
-    }
-
-    return false;
-  } catch (error) {
-    console.error("Copy directory error:", error);
-    return false;
-  }
-};
-
-/**
- * Verify that cache file exists and is valid
- */
-const verifyCacheFile = (cachePath: string, platform: string): boolean => {
-  if (!fs.existsSync(cachePath)) {
-    return false;
-  }
-
-  const stats = fs.statSync(cachePath);
-  if (!stats.isDirectory() && platform === "ios") {
-    return false;
-  }
-
-  return true;
-};
+const shortFingerprint = (fingerprintHash: string): string =>
+  fingerprintHash.replace(/[\r\n\t]/g, "").slice(0, 12);
 
 const plugin: BuildCacheProviderPlugin = {
-  resolveBuildCache: async (props: ResolveBuildCacheProps, _options) => {
+  resolveBuildCache: async (props: ResolveBuildCacheProps) => {
     const { fingerprintHash, platform, projectRoot } = props;
-    console.log(
-      `Searching for cached build with fingerprint: ${fingerprintHash}`
-    );
-
-    const cacheFilePath = getCacheFilePath(
-      projectRoot,
-      fingerprintHash,
-      platform
-    );
-
-    if (verifyCacheFile(cacheFilePath, platform)) {
-      console.log(
-        `Cache hit! Found build for ${platform} with fingerprint ${fingerprintHash}`
-      );
-      return cacheFilePath;
-    }
-
-    console.log(
-      `Cache miss. No build found for ${platform} with fingerprint ${fingerprintHash}`
-    );
-    return null;
-  },
-
-  uploadBuildCache: async (props: UploadBuildCacheProps, _options) => {
-    const { fingerprintHash, platform, buildPath, projectRoot } = props;
-    console.log(
-      `Uploading build for ${platform} with fingerprint: ${fingerprintHash}`
-    );
-
-    const cacheFilePath = getCacheFilePath(
-      projectRoot,
-      fingerprintHash,
-      platform
-    );
+    const fingerprint = shortFingerprint(fingerprintHash);
+    console.log(`Searching for ${platform} cache entry ${fingerprint}`);
 
     try {
-      // Check if build artifact exists
-      if (!fs.existsSync(buildPath)) {
-        console.error(`Build artifact not found at: ${buildPath}`);
-        return null;
+      const cachePath = await resolveCacheEntry({
+        projectRoot,
+        platform,
+        fingerprintHash,
+      });
+
+      if (cachePath) {
+        console.log(`Cache hit for ${platform} fingerprint ${fingerprint}`);
+        return cachePath;
       }
 
-      // Get stats to check if it's a directory or file
-      const stats = fs.statSync(buildPath);
-
-      if (stats.isDirectory()) {
-        console.log(`Copying directory: ${buildPath} -> ${cacheFilePath}`);
-        const success = copyDirectory(buildPath, cacheFilePath);
-        if (!success) {
-          console.error("Failed to copy directory");
-          return null;
-        }
-      } else {
-        // It's a regular file, use copyFileSync
-        console.log(`Copying file: ${buildPath} -> ${cacheFilePath}`);
-        fs.copyFileSync(buildPath, cacheFilePath);
-      }
-
-      // Verify cache file was created successfully
-      if (verifyCacheFile(cacheFilePath, platform)) {
-        console.log(`Successfully cached build at: ${cacheFilePath}`);
-        return cacheFilePath;
-      } else {
-        console.error(`Failed to verify cache file: ${cacheFilePath}`);
-        return null;
-      }
+      console.log(`Cache miss for ${platform} fingerprint ${fingerprint}`);
+      return null;
     } catch (error) {
-      console.error("Error uploading build to cache:", error);
+      console.warn(
+        "Cache lookup failed; continuing with a native build",
+        error
+      );
+      return null;
+    }
+  },
+
+  uploadBuildCache: async (props: UploadBuildCacheProps) => {
+    const { fingerprintHash, platform, buildPath, projectRoot } = props;
+    const fingerprint = shortFingerprint(fingerprintHash);
+    console.log(`Caching ${platform} build for fingerprint ${fingerprint}`);
+
+    try {
+      if (!buildPath) {
+        console.warn("Expo did not provide a build artifact path");
+        return null;
+      }
+
+      const cachePath = await uploadCacheEntry(
+        { projectRoot, platform, fingerprintHash },
+        buildPath
+      );
+      console.log(`Cached ${platform} build at ${cachePath}`);
+      return cachePath;
+    } catch (error) {
+      console.warn(
+        "Cache upload failed; the native build remains usable",
+        error
+      );
       return null;
     }
   },
