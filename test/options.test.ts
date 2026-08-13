@@ -5,8 +5,10 @@ import * as path from "path";
 
 import {
   DEFAULT_CACHE_POLICY,
+  DEFAULT_ENVIRONMENT_OPTIONS,
   formatSizeBytes,
   normalizeCacheOptions,
+  normalizeEnvironmentOptions,
   parseSizeBytes,
 } from "../src/cache/options";
 import { readPolicyState, writePolicyState } from "../src/cache/policy-state";
@@ -115,6 +117,53 @@ describe("cache provider options", () => {
     expect(() =>
       normalizeCacheOptions(null as unknown as Record<string, never>)
     ).toThrow();
+  });
+
+  it("defaults to safe environment identity without a manual key", () => {
+    expect(normalizeEnvironmentOptions()).toEqual({
+      toolchainMode: "safe",
+      environmentKeyDigest: null,
+    });
+    expect(Object.isFrozen(DEFAULT_ENVIRONMENT_OPTIONS)).toBe(true);
+  });
+
+  it("normalizes toolchain modes and immediately digests manual keys", () => {
+    const normalized = normalizeEnvironmentOptions({
+      toolchain: "strict",
+      environmentKey: "private-team-context",
+    });
+
+    expect(normalized).toEqual({
+      toolchainMode: "strict",
+      environmentKeyDigest:
+        "122e7cf3d63dbef82550acc60cf2f61a354b50fc5855482c6ca5599d5ff5a81a",
+    });
+    expect(JSON.stringify(normalized)).not.toContain("private-team-context");
+    expect(normalizeEnvironmentOptions({ toolchain: "off" })).toEqual({
+      toolchainMode: "off",
+      environmentKeyDigest: null,
+    });
+  });
+
+  it("validates environment identity options through both normalizers", () => {
+    const invalidToolchain = { toolchain: "automatic" } as never;
+    const controlKey = { environmentKey: "team\u0000secret" } as never;
+    const oversizedKey = { environmentKey: "🔐".repeat(513) };
+    const nonStringKey = { environmentKey: 42 } as never;
+
+    for (const options of [
+      invalidToolchain,
+      controlKey,
+      oversizedKey,
+      nonStringKey,
+    ]) {
+      expect(() => normalizeEnvironmentOptions(options)).toThrow();
+      expect(() => normalizeCacheOptions(options)).toThrow();
+    }
+    expect(
+      normalizeEnvironmentOptions({ environmentKey: "🔐".repeat(512) })
+        .environmentKeyDigest
+    ).toMatch(/^[a-f0-9]{64}$/);
   });
 
   it("formats byte counts using the same binary units", () => {

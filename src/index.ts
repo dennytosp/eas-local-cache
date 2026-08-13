@@ -16,18 +16,21 @@ import {
 } from "./cache/events";
 import { ensureProviderRoot } from "./cache/filesystem";
 import { calculateProjectFingerprint } from "./cache/fingerprint";
+import { createEffectiveEnvironmentIdentity } from "./cache/environment-key";
 import {
   createCacheInsight,
   normalizeRunProfile,
   readInsight,
   runProfilesEqual,
   selectClosestInsight,
+  type EnvironmentEvidenceCategory,
   type FingerprintSnapshot,
   type InsightCandidate,
   type RunProfile,
 } from "./cache/insight";
 import {
   normalizeCacheOptions,
+  normalizeEnvironmentOptions,
   type CacheProviderOptions,
 } from "./cache/options";
 import { getCachePaths, getEntryId, type CachePlatform } from "./cache/paths";
@@ -43,11 +46,42 @@ import {
   uploadCacheEntry,
   type CacheMissReason,
 } from "./cache/store";
+import { discoverToolchain } from "./cache/toolchain";
 
 type CalculationState = {
   fingerprintHash: string;
   snapshot: FingerprintSnapshot | null;
   updatedAtMs: number;
+};
+
+const environmentEvidenceLabels: Record<
+  EnvironmentEvidenceCategory,
+  { code: ResolveExplanationCode; label: string }
+> = {
+  "build-profile": {
+    code: "build-profile-changed",
+    label:
+      "build configuration, variant, scheme, or architecture selection changed",
+  },
+  xcode: { code: "xcode-changed", label: "Xcode changed" },
+  "platform-sdk": {
+    code: "platform-sdk-changed",
+    label: "the platform SDK changed",
+  },
+  jdk: { code: "jdk-changed", label: "the JDK changed" },
+  gradle: { code: "gradle-changed", label: "Gradle changed" },
+  architecture: {
+    code: "architecture-changed",
+    label: "the host or target architecture changed",
+  },
+  "manual-environment": {
+    code: "manual-environment-changed",
+    label: "the manual environment context changed",
+  },
+  "key-schema": {
+    code: "environment-key-upgraded",
+    label: "the cache identity upgraded to environment-aware keying",
+  },
 };
 
 type PendingBuild = {
@@ -114,18 +148,31 @@ const shortFingerprint = (fingerprintHash: string): string =>
 const getStateKey = (
   projectRoot: string,
   platform: CachePlatform,
-  profile: RunProfile
-): string => JSON.stringify([path.resolve(projectRoot), platform, profile]);
+  profile: RunProfile,
+  fingerprintHash: string
+): string =>
+  JSON.stringify([
+    path.resolve(projectRoot),
+    platform,
+    profile,
+    fingerprintHash,
+  ]);
 
 const getProfileState = (props: {
   projectRoot: string;
   platform: CachePlatform;
   runOptions: unknown;
+  fingerprintHash: string;
 }) => {
   const profile = normalizeRunProfile(props.platform, props.runOptions);
   return {
     profile,
-    key: getStateKey(props.projectRoot, props.platform, profile),
+    key: getStateKey(
+      props.projectRoot,
+      props.platform,
+      profile,
+      props.fingerprintHash
+    ),
   };
 };
 
@@ -219,25 +266,35 @@ const findInsightExplanation = (
         messages: ["the Expo fingerprint engine version changed"],
       };
     }
-    if (closest.status !== "match" || closest.diff.total === 0) {
+    if (
+      closest.status !== "match" ||
+      (closest.diff.total === 0 && closest.environmentDiff.total === 0)
+    ) {
       return {
         code: "no-compatible-insight",
         messages: ["no compatible prior fingerprint evidence is available"],
       };
     }
 
-    const groups = closest.diff.groups.slice(0, 3);
+    const environmentGroups = closest.environmentDiff.groups.map(
+      ({ category, count }) => ({
+        code: environmentEvidenceLabels[category].code,
+        message: `${environmentEvidenceLabels[category].label} (${count} field${
+          count === 1 ? "" : "s"
+        })`,
+      })
+    );
+    const sourceGroups = closest.diff.groups.map(({ category, count }) => ({
+      code: evidenceLabels[category].code,
+      message: `${evidenceLabels[category].label} (${count} source${
+        count === 1 ? "" : "s"
+      })`,
+    }));
+    const groups = [...environmentGroups, ...sourceGroups].slice(0, 3);
     const first = groups[0];
     return {
-      code: first
-        ? evidenceLabels[first.category].code
-        : "no-compatible-insight",
-      messages: groups.map(
-        ({ category, count }) =>
-          `${evidenceLabels[category].label} (${count} source${
-            count === 1 ? "" : "s"
-          })`
-      ),
+      code: first?.code ?? "no-compatible-insight",
+      messages: groups.map(({ message }) => message),
     };
   } catch {
     return {
@@ -283,17 +340,61 @@ const recordEvent = async (
 const plugin: BuildCacheProviderPlugin<CacheProviderOptions> = {
   calculateFingerprintHash: async (
     props: CalculateFingerprintHashProps,
-    _options: CacheProviderOptions
+    options: CacheProviderOptions = {}
   ) => {
-    const { key } = getProfileState(props);
     pruneLifecycleState();
     try {
-      const calculation = await calculateProjectFingerprint(props);
-      setCalculation(key, calculation, Date.now());
-      return calculation.fingerprintHash;
+      const baseCalculation = await calculateProjectFingerprint(props);
+      const environmentOptions = normalizeEnvironmentOptions(options);
+      const profile = normalizeRunProfile(props.platform, props.runOptions);
+      let toolchain = null;
+      if (environmentOptions.toolchainMode !== "off") {
+        const discovery = await discoverToolchain({
+          projectRoot: props.projectRoot,
+          platform: props.platform,
+          runOptions: props.runOptions,
+          mode: environmentOptions.toolchainMode,
+        });
+        if (discovery.status !== "available") {
+          throw new Error(
+            `toolchain discovery unavailable (${discovery.reason})`
+          );
+        }
+        toolchain = discovery.snapshot;
+      }
+      const identity = createEffectiveEnvironmentIdentity({
+        baseFingerprintHash: baseCalculation.fingerprintHash,
+        platform: props.platform,
+        runProfile: profile,
+        toolchainMode: environmentOptions.toolchainMode,
+        environmentKeyDigest: environmentOptions.environmentKeyDigest,
+        toolchain: toolchain === null ? {} : { ...toolchain },
+      });
+      const snapshot = baseCalculation.snapshot
+        ? {
+            ...baseCalculation.snapshot,
+            fingerprintHash: identity.effectiveFingerprintHash,
+            baseFingerprintHash: identity.baseFingerprintHash,
+            effectiveFingerprintHash: identity.effectiveFingerprintHash,
+            keySchema: identity.keySchema,
+            toolchainMode: identity.toolchainMode,
+            toolchain,
+            environmentKeyDigest: identity.environmentKeyDigest,
+          }
+        : null;
+      const key = getStateKey(
+        props.projectRoot,
+        props.platform,
+        profile,
+        identity.effectiveFingerprintHash
+      );
+      setCalculation(
+        key,
+        { fingerprintHash: identity.effectiveFingerprintHash, snapshot },
+        Date.now()
+      );
+      return identity.effectiveFingerprintHash;
     } catch (error) {
-      calculations.delete(key);
-      pendingBuilds.delete(key);
       console.warn(
         "Could not calculate the local build-cache fingerprint; caching is disabled for this build",
         error instanceof Error ? error.message : error

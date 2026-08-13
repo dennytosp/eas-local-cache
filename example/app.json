@@ -37,7 +37,8 @@
         "maxSize": "20GB",
         "maxEntries": 50,
         "retentionDays": 14,
-        "autoPrune": true
+        "autoPrune": true,
+        "toolchain": "safe"
       }
     },
     "experiments": {

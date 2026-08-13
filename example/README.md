@@ -132,3 +132,17 @@ also requires exactly two new misses and two new hits, scans diagnostics for
 token leaks, and requires a healthy cache at the end. Tokens are not written to
 insight or event metadata; they only make Expo's evaluated config fingerprint
 change.
+
+## Test environment-safe keys
+
+The environment oracle keeps Expo inputs constant while changing the native
+build profile. On iOS it runs Debug miss → Debug hit → Release explained miss →
+Release hit:
+
+```bash
+EAS_LOCAL_CACHE_TEST_DEVICE=generic bun run cache:test:environment:ios
+```
+
+With an Android emulator, `bun run cache:test:environment:android` compares a
+targeted debug artifact with an all-architecture debug artifact. Both scripts
+assert two hits, two misses, diagnostic privacy, and a healthy cache.
