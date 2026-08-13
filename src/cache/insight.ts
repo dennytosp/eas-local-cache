@@ -3,9 +3,10 @@ import * as fs from "fs";
 import * as path from "path";
 
 import { isPathInside } from "./filesystem";
+import { TOOLCHAIN_MODES, type ToolchainMode } from "./options";
 import type { CachePlatform } from "./paths";
 
-export const INSIGHT_SCHEMA_VERSION = 1;
+export const INSIGHT_SCHEMA_VERSION = 2;
 export const INSIGHT_FILENAME = "insight.json";
 export const MAX_INSIGHT_BYTES = 1024 * 1024;
 export const MAX_INSIGHT_SOURCES = 10_000;
@@ -15,6 +16,25 @@ const MAX_IDENTITY_LENGTH = 16_384;
 const MAX_HASH_LENGTH = 256;
 const MAX_ENGINE_VERSION_LENGTH = 128;
 const MAX_PROFILE_VALUE_LENGTH = 256;
+const MAX_TOOLCHAIN_VALUE_LENGTH = 128;
+
+const HOST_ARCHITECTURES = ["arm64", "x86_64", "x86", "arm"] as const;
+const JAVA_VENDOR_FAMILIES = [
+  "adoptium",
+  "amazon",
+  "azul",
+  "microsoft",
+  "oracle",
+  "other",
+] as const;
+const JAVA_VM_FAMILIES = ["hotspot", "openj9", "graalvm", "other"] as const;
+const ANDROID_TARGET_ARCHITECTURES = [
+  "all",
+  "arm64-v8a",
+  "armeabi-v7a",
+  "x86",
+  "x86_64",
+] as const;
 
 export const EVIDENCE_CATEGORIES = [
   "expo-config",
@@ -37,6 +57,36 @@ export type AndroidRunProfile = {
 };
 
 export type RunProfile = IosRunProfile | AndroidRunProfile;
+
+export const INSIGHT_KEY_SCHEMAS = ["expo-base", "environment-v1"] as const;
+export type InsightKeySchema = (typeof INSIGHT_KEY_SCHEMAS)[number];
+
+export type IosToolchainSnapshot = {
+  platform: "ios";
+  hostArch: string;
+  xcodeBuildVersion: string;
+  simulatorSdkBuildVersion: string;
+  xcodeVersion?: string;
+  simulatorSdkVersion?: string;
+};
+
+export type AndroidToolchainSnapshot = {
+  platform: "android";
+  hostArch: string;
+  javaSpecificationVersion: string;
+  javaVendorFamily: string;
+  jvmArch: string;
+  gradleVersion: string;
+  targetArchitecture: string;
+  javaRuntimeVersion?: string;
+  vmFamily?: string;
+  gradleDistributionBasename?: string;
+  gradleDistributionSha256?: string;
+};
+
+export type InsightToolchainSnapshot =
+  | IosToolchainSnapshot
+  | AndroidToolchainSnapshot;
 
 export type RawFingerprintSource = {
   type: "file" | "dir" | "contents";
@@ -61,6 +111,12 @@ export type InsightSource = {
 export type FingerprintSnapshot = {
   platform: CachePlatform;
   fingerprintHash: string;
+  baseFingerprintHash?: string;
+  effectiveFingerprintHash?: string;
+  keySchema?: InsightKeySchema;
+  toolchainMode?: ToolchainMode;
+  toolchain?: InsightToolchainSnapshot | null;
+  environmentKeyDigest?: string | null;
   capturedAt: string;
   fingerprintEngineVersion: string;
   runProfile: RunProfile;
@@ -72,10 +128,75 @@ export type ArtifactReadyEstimate = {
   method: "artifact-mtime-v1";
 };
 
-export type CacheInsight = FingerprintSnapshot & {
+export type CacheInsightV1 = Omit<
+  FingerprintSnapshot,
+  | "baseFingerprintHash"
+  | "effectiveFingerprintHash"
+  | "keySchema"
+  | "toolchainMode"
+  | "toolchain"
+  | "environmentKeyDigest"
+> & {
   schemaVersion: 1;
   entryId: string;
   artifactReadyEstimate?: ArtifactReadyEstimate;
+};
+
+export type CacheInsightV2 = Omit<
+  FingerprintSnapshot,
+  | "baseFingerprintHash"
+  | "effectiveFingerprintHash"
+  | "keySchema"
+  | "toolchainMode"
+  | "toolchain"
+  | "environmentKeyDigest"
+> & {
+  schemaVersion: 2;
+  entryId: string;
+  baseFingerprintHash: string;
+  effectiveFingerprintHash: string;
+  keySchema: InsightKeySchema;
+  toolchainMode: ToolchainMode;
+  toolchain: InsightToolchainSnapshot | null;
+  environmentKeyDigest: string | null;
+  artifactReadyEstimate?: ArtifactReadyEstimate;
+};
+
+export type CacheInsight = CacheInsightV1 | CacheInsightV2;
+
+export type InsightIdentity = {
+  fingerprintHash: string;
+  baseFingerprintHash: string;
+  effectiveFingerprintHash: string;
+  keySchema: InsightKeySchema;
+  toolchainMode: ToolchainMode;
+  toolchain: InsightToolchainSnapshot | null;
+  environmentKeyDigest: string | null;
+};
+
+export const ENVIRONMENT_EVIDENCE_CATEGORIES = [
+  "build-profile",
+  "xcode",
+  "platform-sdk",
+  "jdk",
+  "gradle",
+  "architecture",
+  "manual-environment",
+  "key-schema",
+] as const;
+
+export type EnvironmentEvidenceCategory =
+  (typeof ENVIRONMENT_EVIDENCE_CATEGORIES)[number];
+
+export type EnvironmentDiffItem = {
+  field: string;
+  category: EnvironmentEvidenceCategory;
+};
+
+export type EnvironmentDiff = {
+  items: EnvironmentDiffItem[];
+  total: number;
+  groups: Array<{ category: EnvironmentEvidenceCategory; count: number }>;
 };
 
 export type InsightDiffOperation = "added" | "removed" | "changed";
@@ -108,6 +229,7 @@ export type ClosestInsightResult =
       status: "match";
       candidate: InsightCandidate;
       diff: InsightDiff;
+      environmentDiff: EnvironmentDiff;
     }
   | {
       status:
@@ -455,11 +577,134 @@ const isArtifactReadyEstimate = (
   value.durationMs <= 6 * 60 * 60 * 1000 &&
   value.method === "artifact-mtime-v1";
 
-export const isCacheInsight = (value: unknown): value is CacheInsight => {
-  if (!isRecord(value)) {
+const isToolchainValue = (value: unknown): value is string =>
+  isBoundedString(value, MAX_TOOLCHAIN_VALUE_LENGTH) &&
+  /^[a-zA-Z0-9][a-zA-Z0-9._+()-]*$/.test(value);
+
+const isEnumValue = <T extends string>(
+  values: readonly T[],
+  value: unknown
+): value is T => values.includes(value as T);
+
+const isIosToolchainSnapshot = (
+  value: unknown
+): value is IosToolchainSnapshot =>
+  isRecord(value) &&
+  hasOnlyKeys(value, [
+    "platform",
+    "hostArch",
+    "xcodeBuildVersion",
+    "simulatorSdkBuildVersion",
+    "xcodeVersion",
+    "simulatorSdkVersion",
+  ]) &&
+  value.platform === "ios" &&
+  isEnumValue(HOST_ARCHITECTURES, value.hostArch) &&
+  isToolchainValue(value.xcodeBuildVersion) &&
+  isToolchainValue(value.simulatorSdkBuildVersion) &&
+  (value.xcodeVersion === undefined || isToolchainValue(value.xcodeVersion)) &&
+  (value.simulatorSdkVersion === undefined ||
+    isToolchainValue(value.simulatorSdkVersion));
+
+const isAndroidToolchainSnapshot = (
+  value: unknown
+): value is AndroidToolchainSnapshot =>
+  isRecord(value) &&
+  hasOnlyKeys(value, [
+    "platform",
+    "hostArch",
+    "javaSpecificationVersion",
+    "javaVendorFamily",
+    "jvmArch",
+    "gradleVersion",
+    "targetArchitecture",
+    "javaRuntimeVersion",
+    "vmFamily",
+    "gradleDistributionBasename",
+    "gradleDistributionSha256",
+  ]) &&
+  value.platform === "android" &&
+  isEnumValue(HOST_ARCHITECTURES, value.hostArch) &&
+  isToolchainValue(value.javaSpecificationVersion) &&
+  isEnumValue(JAVA_VENDOR_FAMILIES, value.javaVendorFamily) &&
+  isEnumValue(HOST_ARCHITECTURES, value.jvmArch) &&
+  isToolchainValue(value.gradleVersion) &&
+  isEnumValue(ANDROID_TARGET_ARCHITECTURES, value.targetArchitecture) &&
+  (value.javaRuntimeVersion === undefined ||
+    isToolchainValue(value.javaRuntimeVersion)) &&
+  (value.vmFamily === undefined ||
+    isEnumValue(JAVA_VM_FAMILIES, value.vmFamily)) &&
+  (value.gradleDistributionBasename === undefined ||
+    isToolchainValue(value.gradleDistributionBasename)) &&
+  (value.gradleDistributionSha256 === undefined ||
+    (typeof value.gradleDistributionSha256 === "string" &&
+      /^[a-f0-9]{64}$/.test(value.gradleDistributionSha256)));
+
+const isToolchainSnapshot = (
+  platform: CachePlatform,
+  value: unknown
+): value is InsightToolchainSnapshot =>
+  platform === "ios"
+    ? isIosToolchainSnapshot(value)
+    : isAndroidToolchainSnapshot(value);
+
+const isToolchainSnapshotForMode = (
+  platform: CachePlatform,
+  mode: Exclude<ToolchainMode, "off">,
+  value: unknown
+): value is InsightToolchainSnapshot => {
+  if (!isToolchainSnapshot(platform, value)) {
     return false;
   }
 
+  if (value.platform === "ios") {
+    return mode === "strict"
+      ? value.xcodeVersion !== undefined &&
+          value.simulatorSdkVersion !== undefined
+      : value.xcodeVersion === undefined &&
+          value.simulatorSdkVersion === undefined;
+  }
+
+  return mode === "strict"
+    ? value.javaRuntimeVersion !== undefined &&
+        value.vmFamily !== undefined &&
+        value.gradleDistributionBasename !== undefined
+    : value.javaRuntimeVersion === undefined &&
+        value.vmFamily === undefined &&
+        value.gradleDistributionBasename === undefined &&
+        value.gradleDistributionSha256 === undefined;
+};
+
+const isCacheInsightCommon = (value: Record<string, unknown>): boolean =>
+  isCachePlatform(value.platform) &&
+  typeof value.entryId === "string" &&
+  /^[a-f0-9]{64}$/.test(value.entryId) &&
+  isBoundedString(value.fingerprintHash, MAX_HASH_LENGTH) &&
+  isIsoTimestamp(value.capturedAt) &&
+  isBoundedString(value.fingerprintEngineVersion, MAX_ENGINE_VERSION_LENGTH) &&
+  isRunProfile(value.platform, value.runProfile) &&
+  Array.isArray(value.sources) &&
+  value.sources.length <= MAX_INSIGHT_SOURCES &&
+  value.sources.every(isInsightSource) &&
+  (value.artifactReadyEstimate === undefined ||
+    isArtifactReadyEstimate(value.artifactReadyEstimate));
+
+const hasSequentialSourceOccurrences = (
+  sources: readonly InsightSource[]
+): boolean => {
+  const occurrences = new Map<string, number>();
+  for (const source of sources) {
+    const key = `${source.type}\0${source.comparatorHash}`;
+    const expected = occurrences.get(key) ?? 0;
+    if (source.occurrence !== expected) {
+      return false;
+    }
+    occurrences.set(key, expected + 1);
+  }
+  return true;
+};
+
+const isCacheInsightV1 = (value: Record<string, unknown>): boolean => {
   const allowedKeys = [
     "schemaVersion",
     "platform",
@@ -471,52 +716,156 @@ export const isCacheInsight = (value: unknown): value is CacheInsight => {
     "sources",
     "artifactReadyEstimate",
   ];
+  return (
+    value.schemaVersion === 1 &&
+    hasOnlyKeys(value, allowedKeys) &&
+    isCacheInsightCommon(value) &&
+    hasSequentialSourceOccurrences(value.sources as InsightSource[])
+  );
+};
+
+const isCacheInsightV2 = (value: Record<string, unknown>): boolean => {
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  const allowedKeys = [
+    "schemaVersion",
+    "platform",
+    "entryId",
+    "fingerprintHash",
+    "baseFingerprintHash",
+    "effectiveFingerprintHash",
+    "keySchema",
+    "toolchainMode",
+    "toolchain",
+    "environmentKeyDigest",
+    "capturedAt",
+    "fingerprintEngineVersion",
+    "runProfile",
+    "sources",
+    "artifactReadyEstimate",
+  ];
   if (
     !hasOnlyKeys(value, allowedKeys) ||
     value.schemaVersion !== INSIGHT_SCHEMA_VERSION ||
-    !isCachePlatform(value.platform) ||
-    typeof value.entryId !== "string" ||
-    !/^[a-f0-9]{64}$/.test(value.entryId) ||
-    !isBoundedString(value.fingerprintHash, MAX_HASH_LENGTH) ||
-    !isIsoTimestamp(value.capturedAt) ||
-    !isBoundedString(
-      value.fingerprintEngineVersion,
-      MAX_ENGINE_VERSION_LENGTH
-    ) ||
-    !isRunProfile(value.platform, value.runProfile) ||
-    !Array.isArray(value.sources) ||
-    value.sources.length > MAX_INSIGHT_SOURCES ||
-    !value.sources.every(isInsightSource) ||
-    (value.artifactReadyEstimate !== undefined &&
-      !isArtifactReadyEstimate(value.artifactReadyEstimate))
+    !isCacheInsightCommon(value) ||
+    !isBoundedString(value.baseFingerprintHash, MAX_HASH_LENGTH) ||
+    !isBoundedString(value.effectiveFingerprintHash, MAX_HASH_LENGTH) ||
+    value.fingerprintHash !== value.effectiveFingerprintHash ||
+    !INSIGHT_KEY_SCHEMAS.includes(value.keySchema as InsightKeySchema) ||
+    !TOOLCHAIN_MODES.includes(value.toolchainMode as ToolchainMode) ||
+    (value.environmentKeyDigest !== null &&
+      (typeof value.environmentKeyDigest !== "string" ||
+        !/^[a-f0-9]{64}$/.test(value.environmentKeyDigest)))
   ) {
     return false;
   }
 
-  const occurrences = new Map<string, number>();
-  for (const source of value.sources) {
-    const key = `${source.type}\0${source.comparatorHash}`;
-    const expected = occurrences.get(key) ?? 0;
-    if (source.occurrence !== expected) {
-      return false;
-    }
-    occurrences.set(key, expected + 1);
+  if (
+    value.keySchema === "expo-base" &&
+    (value.baseFingerprintHash !== value.effectiveFingerprintHash ||
+      value.toolchainMode !== "off" ||
+      value.toolchain !== null ||
+      value.environmentKeyDigest !== null)
+  ) {
+    return false;
   }
 
-  return true;
+  if (
+    value.keySchema === "environment-v1" &&
+    (!/^elc-env-v1:[a-f0-9]{64}$/.test(
+      value.effectiveFingerprintHash as string
+    ) ||
+      (value.toolchainMode === "off" &&
+        (value.toolchain !== null || value.environmentKeyDigest === null)) ||
+      (value.toolchainMode !== "off" &&
+        !isToolchainSnapshotForMode(
+          value.platform as CachePlatform,
+          value.toolchainMode as Exclude<ToolchainMode, "off">,
+          value.toolchain
+        )))
+  ) {
+    return false;
+  }
+
+  return hasSequentialSourceOccurrences(value.sources as InsightSource[]);
+};
+
+export const isCacheInsight = (value: unknown): value is CacheInsight =>
+  isRecord(value) && (isCacheInsightV1(value) || isCacheInsightV2(value));
+
+export const getInsightIdentity = (insight: CacheInsight): InsightIdentity => {
+  if (insight.schemaVersion === 1) {
+    return {
+      fingerprintHash: insight.fingerprintHash,
+      baseFingerprintHash: insight.fingerprintHash,
+      effectiveFingerprintHash: insight.fingerprintHash,
+      keySchema: "expo-base",
+      toolchainMode: "off",
+      toolchain: null,
+      environmentKeyDigest: null,
+    };
+  }
+
+  return {
+    fingerprintHash: insight.fingerprintHash,
+    baseFingerprintHash: insight.baseFingerprintHash,
+    effectiveFingerprintHash: insight.effectiveFingerprintHash,
+    keySchema: insight.keySchema,
+    toolchainMode: insight.toolchainMode,
+    toolchain: insight.toolchain,
+    environmentKeyDigest: insight.environmentKeyDigest,
+  };
 };
 
 export const createCacheInsight = (
   snapshot: FingerprintSnapshot,
   entryId: string,
   artifactReadyEstimate?: ArtifactReadyEstimate
-): CacheInsight => {
-  const insight: CacheInsight = {
+): CacheInsightV2 => {
+  const usesEnvironmentIdentity =
+    snapshot.keySchema !== undefined ||
+    snapshot.baseFingerprintHash !== undefined ||
+    snapshot.effectiveFingerprintHash !== undefined ||
+    snapshot.toolchainMode !== undefined ||
+    snapshot.toolchain !== undefined ||
+    snapshot.environmentKeyDigest !== undefined;
+  const keySchema = snapshot.keySchema ?? "expo-base";
+  const baseFingerprintHash =
+    snapshot.baseFingerprintHash ?? snapshot.fingerprintHash;
+  const effectiveFingerprintHash =
+    snapshot.effectiveFingerprintHash ?? snapshot.fingerprintHash;
+  const toolchainMode = snapshot.toolchainMode ?? "off";
+  const toolchain = snapshot.toolchain ?? null;
+  const environmentKeyDigest = snapshot.environmentKeyDigest ?? null;
+
+  const insight: CacheInsightV2 = {
     schemaVersion: INSIGHT_SCHEMA_VERSION,
-    ...snapshot,
+    platform: snapshot.platform,
     entryId,
+    fingerprintHash: snapshot.fingerprintHash,
+    baseFingerprintHash,
+    effectiveFingerprintHash,
+    keySchema,
+    toolchainMode,
+    toolchain,
+    environmentKeyDigest,
+    capturedAt: snapshot.capturedAt,
+    fingerprintEngineVersion: snapshot.fingerprintEngineVersion,
+    runProfile: snapshot.runProfile,
+    sources: snapshot.sources,
     ...(artifactReadyEstimate === undefined ? {} : { artifactReadyEstimate }),
   };
+  if (
+    usesEnvironmentIdentity &&
+    (snapshot.baseFingerprintHash === undefined ||
+      snapshot.effectiveFingerprintHash === undefined ||
+      snapshot.keySchema === undefined ||
+      snapshot.toolchainMode === undefined)
+  ) {
+    throw new Error("Environment-aware insight identity is incomplete");
+  }
   if (!isCacheInsight(insight)) {
     throw new Error("Could not create a valid cache insight");
   }
@@ -709,6 +1058,101 @@ export const getTopEvidenceGroups = (
   diff: Pick<InsightDiff, "groups">
 ): InsightDiff["groups"] => diff.groups.slice(0, 3);
 
+const environmentCategoryForField = (
+  field: string
+): EnvironmentEvidenceCategory => {
+  if (field.startsWith("runProfile.")) return "build-profile";
+  if (field === "xcodeBuildVersion" || field === "xcodeVersion") return "xcode";
+  if (field === "simulatorSdkBuildVersion" || field === "simulatorSdkVersion")
+    return "platform-sdk";
+  if (
+    field === "javaSpecificationVersion" ||
+    field === "javaVendorFamily" ||
+    field === "javaRuntimeVersion" ||
+    field === "vmFamily"
+  )
+    return "jdk";
+  if (field.startsWith("gradle")) return "gradle";
+  if (
+    field === "hostArch" ||
+    field === "jvmArch" ||
+    field === "targetArchitecture"
+  )
+    return "architecture";
+  if (field === "environmentKeyDigest") return "manual-environment";
+  return "key-schema";
+};
+
+const getSnapshotIdentity = (
+  snapshot: FingerprintSnapshot
+): InsightIdentity => ({
+  fingerprintHash: snapshot.fingerprintHash,
+  baseFingerprintHash: snapshot.baseFingerprintHash ?? snapshot.fingerprintHash,
+  effectiveFingerprintHash:
+    snapshot.effectiveFingerprintHash ?? snapshot.fingerprintHash,
+  keySchema: snapshot.keySchema ?? "expo-base",
+  toolchainMode: snapshot.toolchainMode ?? "off",
+  toolchain: snapshot.toolchain ?? null,
+  environmentKeyDigest: snapshot.environmentKeyDigest ?? null,
+});
+
+const flattenedEnvironment = (
+  profile: RunProfile,
+  identity: InsightIdentity
+): Map<string, string | null> => {
+  const fields = new Map<string, string | null>();
+  for (const [key, value] of Object.entries(profile).sort(([left], [right]) =>
+    left.localeCompare(right)
+  )) {
+    fields.set(`runProfile.${key}`, String(value));
+  }
+  fields.set("keySchema", identity.keySchema);
+  fields.set("toolchainMode", identity.toolchainMode);
+  fields.set("environmentKeyDigest", identity.environmentKeyDigest);
+  if (identity.toolchain !== null) {
+    for (const [key, value] of Object.entries(identity.toolchain).sort(
+      ([left], [right]) => left.localeCompare(right)
+    )) {
+      if (key !== "platform") fields.set(key, value ?? null);
+    }
+  }
+  return fields;
+};
+
+export const diffInsightEnvironment = (
+  before: CacheInsight,
+  after: FingerprintSnapshot
+): EnvironmentDiff => {
+  const beforeIdentity = getInsightIdentity(before);
+  const afterIdentity = getSnapshotIdentity(after);
+  let items: EnvironmentDiffItem[];
+
+  if (before.schemaVersion === 1 && afterIdentity.keySchema !== "expo-base") {
+    items = [{ field: "keySchema", category: "key-schema" }];
+  } else {
+    const beforeFields = flattenedEnvironment(
+      before.runProfile,
+      beforeIdentity
+    );
+    const afterFields = flattenedEnvironment(after.runProfile, afterIdentity);
+    const names = [
+      ...new Set([...beforeFields.keys(), ...afterFields.keys()]),
+    ].sort();
+    items = names
+      .filter((field) => beforeFields.get(field) !== afterFields.get(field))
+      .map((field) => ({
+        field,
+        category: environmentCategoryForField(field),
+      }));
+  }
+
+  const groups = ENVIRONMENT_EVIDENCE_CATEGORIES.map((category) => ({
+    category,
+    count: items.filter((item) => item.category === category).length,
+  })).filter((group) => group.count > 0);
+  return { items, total: items.length, groups };
+};
+
 const timestampValue = (value: string | null | undefined): number => {
   const parsed =
     value === null || value === undefined ? Number.NaN : Date.parse(value);
@@ -724,13 +1168,7 @@ export const selectClosestInsight = (
   }
 
   const profileCandidates = candidates.filter(
-    (candidate) =>
-      candidate.insight.platform === current.platform &&
-      runProfilesEqual(
-        current.platform,
-        candidate.insight.runProfile,
-        current.runProfile
-      )
+    (candidate) => candidate.insight.platform === current.platform
   );
   if (profileCandidates.length === 0) {
     return {
@@ -753,13 +1191,21 @@ export const selectClosestInsight = (
     };
   }
 
+  const currentIdentity = getSnapshotIdentity(current);
   const ranked = engineCandidates.map((candidate) => ({
     candidate,
     diff: diffInsights(candidate.insight, current),
+    environmentDiff: diffInsightEnvironment(candidate.insight, current),
+    baseFingerprintMatches:
+      getInsightIdentity(candidate.insight).baseFingerprintHash ===
+      currentIdentity.baseFingerprintHash,
   }));
   ranked.sort(
     (left, right) =>
+      Number(right.baseFingerprintMatches) -
+        Number(left.baseFingerprintMatches) ||
       left.diff.total - right.diff.total ||
+      left.environmentDiff.total - right.environmentDiff.total ||
       timestampValue(right.candidate.lastAccessAt) -
         timestampValue(left.candidate.lastAccessAt) ||
       timestampValue(right.candidate.createdAt) -
@@ -771,5 +1217,10 @@ export const selectClosestInsight = (
   if (closest === undefined) {
     return { status: "no-candidate", candidate: null, diff: null };
   }
-  return { status: "match", ...closest };
+  return {
+    status: "match",
+    candidate: closest.candidate,
+    diff: closest.diff,
+    environmentDiff: closest.environmentDiff,
+  };
 };

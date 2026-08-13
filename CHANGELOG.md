@@ -27,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explanations without persisting raw config or source contents.
 - Bounded per-resolve telemetry with retained hit rate, lookup duration, and a
   conservative artifact-timestamp estimate of native build time avoided.
+- Versioned environment-aware identities that separate build profiles,
+  Xcode/Simulator SDKs, JDK/Gradle versions, and Android target ABIs.
+- Safe, strict, and compatibility-off toolchain modes plus a privacy-preserving
+  optional manual environment key.
 
 ### Changed
 

@@ -35,8 +35,16 @@ if (
   );
 }
 
-const { calculateFingerprintHash, resolveBuildCache, uploadBuildCache } =
-  plugin;
+const {
+  calculateFingerprintHash: calculateFingerprintHashCallback,
+  resolveBuildCache,
+  uploadBuildCache,
+} = plugin;
+
+const calculateFingerprintHash = (
+  props: CalculateFingerprintHashProps,
+  _options: Record<string, unknown> = {}
+) => calculateFingerprintHashCallback(props, { toolchain: "off" });
 
 afterAll(() => {
   fs.rmSync(projectRoot, { recursive: true, force: true });
@@ -233,6 +241,43 @@ describe("provider resolution", () => {
       delete process.env.EAS_LOCAL_CACHE_TEST_UNIT_DIGEST;
       log.mockRestore();
     }
+  });
+
+  it("separates manual environment context without persisting the raw key", async () => {
+    installFakeFingerprintEngine("environment-base");
+    const options = {
+      toolchain: "off" as const,
+      environmentKey: "private-environment-context",
+    };
+    const props = calculateProps("ios", projectRoot, {
+      configuration: "Debug",
+    });
+    const fingerprintHash = await calculateFingerprintHashCallback(
+      props,
+      options
+    );
+    expect(fingerprintHash).toMatch(/^elc-env-v1:[a-f0-9]{64}$/);
+    await resolveBuildCache(
+      resolveProps("ios", fingerprintHash!, projectRoot, props.runOptions),
+      options
+    );
+    await calculateFingerprintHashCallback(props, options);
+    await uploadBuildCache(
+      uploadProps(
+        "ios",
+        fingerprintHash!,
+        makeAppBundle("Environment.app"),
+        projectRoot,
+        props.runOptions
+      ),
+      options
+    );
+
+    const insight = readInsight(entryDirectory("ios", fingerprintHash!));
+    expect(insight?.schemaVersion).toBe(2);
+    expect(JSON.stringify(insight)).not.toContain(
+      "private-environment-context"
+    );
   });
 
   it("expires an abandoned build context before correlating a later build", async () => {
