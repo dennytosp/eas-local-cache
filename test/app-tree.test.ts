@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
@@ -302,5 +302,37 @@ describe("ELCAPP1 app-tree archives", () => {
         fileCount: stats.fileCount,
       })
     ).rejects.toThrow("destination");
+  });
+
+  it("checks one absolute deadline throughout extraction loops", async () => {
+    const root = makeRoot();
+    const input = writeArchive(
+      root,
+      archive(
+        Array.from({ length: 64 }, (_, index) => ({
+          type: 2,
+          path: `file-${String(index).padStart(3, "0")}`,
+          mode: 0o600,
+          data: "x",
+        }))
+      )
+    );
+    const baseTime = 1_000_000;
+    let checks = 0;
+    const now = spyOn(Date, "now").mockImplementation(
+      () => baseTime + checks++
+    );
+    try {
+      await expect(
+        extractAppTree(
+          input,
+          path.join(root, "deadline-out"),
+          { sizeBytes: 64, fileCount: 64 },
+          { deadlineMs: baseTime + 20 }
+        )
+      ).rejects.toThrow("extraction exceeded its deadline");
+    } finally {
+      now.mockRestore();
+    }
   });
 });

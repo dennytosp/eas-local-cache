@@ -9,6 +9,10 @@ import type {
 } from "@expo/config";
 
 import { inventoryCache } from "./cache/catalog";
+import {
+  claimAutomaticPruneAttempt,
+  rollbackAutomaticPruneAttempt,
+} from "./cache/automatic-prune-state";
 import { pruneCache } from "./cache/cleanup";
 import {
   recordResolveEvent,
@@ -99,6 +103,7 @@ type PendingBuild = {
 
 const LIFECYCLE_STATE_TTL_MS = 30 * 60 * 1000;
 const MAX_LIFECYCLE_STATES = 128;
+const AUTOMATIC_HIT_PRUNE_THROTTLE_MS = 5 * 60 * 1000;
 
 const calculations = new Map<string, CalculationState>();
 const pendingBuilds = new Map<string, PendingBuild>();
@@ -364,6 +369,69 @@ const recordEvent = async (
   }
 };
 
+const runAutomaticPrune = async (input: {
+  projectRoot: string;
+  options: CacheProviderOptions;
+  protectedEntryId: string;
+  force: boolean;
+}): Promise<void> => {
+  try {
+    const policy = normalizeCacheOptions(input.options);
+    const managedProjectRoot = fs.realpathSync(input.projectRoot);
+    if (!policy.autoPrune && !input.force) {
+      return;
+    }
+
+    const paths = getCachePaths(managedProjectRoot);
+    writePolicyState(paths.providerRoot, paths.stateRoot, policy);
+    if (!policy.autoPrune) {
+      return;
+    }
+    const claim = await claimAutomaticPruneAttempt({
+      providerRoot: paths.providerRoot,
+      stateRoot: paths.stateRoot,
+      locksRoot: paths.locksRoot,
+      policy,
+      throttleMs: AUTOMATIC_HIT_PRUNE_THROTTLE_MS,
+      force: input.force,
+      now: new Date(Date.now()),
+    });
+    if (!claim.claimed) {
+      return;
+    }
+    let result;
+    try {
+      result = await pruneCache(managedProjectRoot, policy, {
+        protectedEntryIds: [input.protectedEntryId],
+      });
+    } catch (error) {
+      if (claim.claim) {
+        await rollbackAutomaticPruneAttempt({
+          providerRoot: paths.providerRoot,
+          stateRoot: paths.stateRoot,
+          locksRoot: paths.locksRoot,
+          claim: claim.claim,
+        }).catch(() => {});
+      }
+      throw error;
+    }
+    if (result.removed.length > 0) {
+      console.log(
+        `Pruned ${result.removed.length} old cache entr${
+          result.removed.length === 1 ? "y" : "ies"
+        } (${result.reclaimedBytes} bytes)`
+      );
+    }
+    if (!result.limitsSatisfied) {
+      console.warn(
+        "Cache limits remain exceeded because active or newly used entries were protected"
+      );
+    }
+  } catch (error) {
+    console.warn("Automatic cache cleanup was skipped", error);
+  }
+};
+
 const plugin: BuildCacheProviderPlugin<CacheProviderOptions> = {
   calculateFingerprintHash: async (
     props: CalculateFingerprintHashProps,
@@ -446,6 +514,7 @@ const plugin: BuildCacheProviderPlugin<CacheProviderOptions> = {
         ? calculation.snapshot
         : null;
     const startedAt = monotonicNow();
+    let importedFromLan = false;
     console.log(`Searching for ${platform} cache entry ${fingerprint}`);
 
     try {
@@ -476,6 +545,7 @@ const plugin: BuildCacheProviderPlugin<CacheProviderOptions> = {
                   : {}),
               });
               if (fetched.imported) {
+                importedFromLan = true;
                 result = await resolveCacheEntryDetailed({
                   projectRoot,
                   platform,
@@ -538,17 +608,13 @@ const plugin: BuildCacheProviderPlugin<CacheProviderOptions> = {
             ? {}
             : { estimatedTimeSavedMs }),
         });
-        if (result.materializedRestore) {
-          try {
-            const policy = normalizeCacheOptions(options);
-            if (policy.autoPrune) {
-              await pruneCache(projectRoot, policy, {
-                protectedEntryIds: [getEntryId(platform, fingerprintHash)],
-              });
-            }
-          } catch (error) {
-            console.warn("Automatic restore cleanup was skipped", error);
-          }
+        if (result.source === "versioned") {
+          await runAutomaticPrune({
+            projectRoot,
+            options,
+            protectedEntryId: getEntryId(platform, fingerprintHash),
+            force: importedFromLan || result.materializedRestore,
+          });
         }
         calculations.delete(key);
         pendingBuilds.delete(key);
@@ -666,30 +732,12 @@ const plugin: BuildCacheProviderPlugin<CacheProviderOptions> = {
       console.log(`Cached ${platform} build at ${cachePath}`);
 
       if (cachePath) {
-        try {
-          const policy = normalizeCacheOptions(options);
-          const paths = getCachePaths(projectRoot);
-          writePolicyState(paths.providerRoot, paths.stateRoot, policy);
-          if (policy.autoPrune) {
-            const result = await pruneCache(projectRoot, policy, {
-              protectedEntryIds: [entryId],
-            });
-            if (result.removed.length > 0) {
-              console.log(
-                `Pruned ${result.removed.length} old cache entr${
-                  result.removed.length === 1 ? "y" : "ies"
-                } (${result.reclaimedBytes} bytes)`
-              );
-            }
-            if (!result.limitsSatisfied) {
-              console.warn(
-                "Cache limits remain exceeded because active or newly built entries were protected"
-              );
-            }
-          }
-        } catch (error) {
-          console.warn("Automatic cache cleanup was skipped", error);
-        }
+        await runAutomaticPrune({
+          projectRoot,
+          options,
+          protectedEntryId: entryId,
+          force: true,
+        });
         try {
           const { lanMode } = normalizeLanOptions(options);
           if (lanMode === "read-write") {

@@ -92,6 +92,40 @@ describe("effective environment identity", () => {
     }
   });
 
+  it("separates selected installed Android SDK package revisions", () => {
+    const androidToolchain = {
+      platform: "android",
+      hostArch: "arm64",
+      compileSdkVersion: "35",
+      androidSdkPlatformRevision: "2",
+      buildToolsVersion: "35.0.0",
+      javaSpecificationVersion: "21",
+      javaVendorFamily: "adoptium",
+      jvmArch: "arm64",
+      gradleVersion: "8.13",
+      targetArchitecture: "all",
+    };
+    const baseline = makeInput({
+      platform: "android",
+      runProfile: { variant: "release", allArch: true },
+      toolchain: androidToolchain,
+    });
+    const baselineHash =
+      createEffectiveEnvironmentIdentity(baseline).effectiveFingerprintHash;
+    for (const changedToolchain of [
+      { ...androidToolchain, compileSdkVersion: "36" },
+      { ...androidToolchain, androidSdkPlatformRevision: "3" },
+      { ...androidToolchain, buildToolsVersion: "36.0.0" },
+    ]) {
+      expect(
+        createEffectiveEnvironmentIdentity(
+          makeInput({ ...baseline, toolchain: changedToolchain })
+        ).effectiveFingerprintHash
+      ).not.toBe(baselineHash);
+    }
+    expect(serializeEnvironmentKeyPayload(baseline)).not.toContain("/Users/");
+  });
+
   it("uses only the base hash and digest when off mode has a manual key", () => {
     const normalized = normalizeEnvironmentOptions({
       toolchain: "off",

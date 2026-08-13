@@ -16,6 +16,8 @@ import {
   type LanPeerConnection,
 } from "../src/lan/client";
 import {
+  advertiseLanPeer,
+  discoverPairedEndpoints,
   discoveryTxtForTesting,
   isPrivateLanAddress,
 } from "../src/lan/discovery";
@@ -281,9 +283,110 @@ describe("authenticated HTTPS LAN transport", () => {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
+
+  it("bounds slow foreground export and import callbacks", async () => {
+    const root = temporaryRoot();
+    const identity = await createServerIdentity();
+    const client = activeClient();
+    const packagePath = path.join(root, "served.wire");
+    fs.writeFileSync(packagePath, "wire", { mode: 0o600 });
+    const packageSha256 = crypto
+      .createHash("sha256")
+      .update("wire")
+      .digest("hex");
+    const entryId = "d".repeat(64);
+    let lateCleanupCalled = false;
+    const incomingDirectory = path.join(root, "incoming");
+    const server = await startLanServer({
+      certificatePem: identity.certificatePem,
+      privateKeyPem: identity.privateKeyPem,
+      serverId: identity.peerId,
+      allowWrite: true,
+      incomingDirectory,
+      operationTimeoutMs: 40,
+      authenticate: createLanServerAuthenticator({
+        findClient: (clientId) =>
+          clientId === client.clientId ? client : null,
+      }),
+      prepareEntry: async () => {
+        await new Promise<void>((resolve) => setTimeout(resolve, 100));
+        return {
+          packagePath,
+          sizeBytes: 4,
+          sha256: packageSha256,
+          cleanup: () => {
+            lateCleanupCalled = true;
+          },
+        };
+      },
+      importEntry: async () => {
+        await new Promise<void>((resolve) => setTimeout(resolve, 100));
+        return "created" as const;
+      },
+    });
+    serverHandles.push(server);
+    const peer: LanPeerConnection = {
+      serverId: identity.peerId,
+      host: "127.0.0.1",
+      port: server.port,
+      certificatePem: identity.certificatePem,
+      clientId: client.clientId,
+      secret: client.secret,
+      capabilities: client.capabilities,
+    };
+
+    const readStarted = Date.now();
+    await expect(
+      headLanEntry(peer, "android", entryId, { timeoutMs: 1_000 })
+    ).rejects.toThrow();
+    expect(Date.now() - readStarted).toBeLessThan(500);
+
+    const uploadStarted = Date.now();
+    await expect(
+      putLanEntry(peer, "android", entryId, packagePath, {
+        timeoutMs: 1_000,
+      })
+    ).rejects.toThrow();
+    expect(Date.now() - uploadStarted).toBeLessThan(500);
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 150));
+    expect(lateCleanupCalled).toBe(true);
+    expect(fs.readdirSync(incomingDirectory)).toEqual([]);
+  });
 });
 
 describe("LAN discovery hints", () => {
+  it("publishes and discovers a paired peer through real mDNS", async () => {
+    const peerId = crypto.randomBytes(32).toString("hex");
+    const port = 20_000 + crypto.randomInt(20_000);
+    const advertisement = advertiseLanPeer({
+      serverId: peerId,
+      port,
+      allowWrite: true,
+      host: "127.0.0.1",
+    });
+
+    try {
+      // Bonjour probes before announcing. Give the publisher time to become
+      // visible so this test exercises the real multicast transport.
+      await new Promise<void>((resolve) => setTimeout(resolve, 750));
+      const endpoints = await discoverPairedEndpoints([peerId], {
+        windowMs: 2_500,
+      });
+
+      expect(endpoints).toHaveLength(1);
+      expect(endpoints[0]?.serverId).toBe(peerId);
+      expect(endpoints[0]?.port).toBe(port);
+      expect(endpoints[0]?.capabilities).toEqual({
+        read: true,
+        write: true,
+      });
+      expect(isPrivateLanAddress(endpoints[0]?.host ?? "")).toBeTrue();
+    } finally {
+      await advertisement.stop();
+    }
+  }, 8_000);
+
   it("accepts only private endpoints belonging to a uniquely paired prefix", () => {
     const peerId = "d".repeat(64);
     const endpoint = discoveryTxtForTesting(

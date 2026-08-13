@@ -17,6 +17,7 @@ import type { LanAuthorizedClient } from "./types";
 const EMPTY_SHA256 = crypto.createHash("sha256").digest("hex");
 const MAX_PAIR_BODY_BYTES = 16 * 1024;
 const MAX_ENTRY_BYTES = 100 * 1024 ** 3 + 128 * 1024;
+const MAX_OPERATION_TIMEOUT_MS = 45_000;
 const ENTRY_ROUTE = /^\/v1\/entries\/(ios|android)\/([a-f0-9]{64})$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 
@@ -68,13 +69,15 @@ export type LanServerOptions = {
   ) => unknown | Promise<unknown>;
   prepareEntry: (
     platform: CachePlatform,
-    entryId: string
+    entryId: string,
+    deadlineMs: number
   ) => PreparedLanEntry | null | Promise<PreparedLanEntry | null>;
   importEntry: (
     platform: CachePlatform,
     entryId: string,
     packagePath: string,
-    transferLock?: EntryLock
+    transferLock: EntryLock | undefined,
+    deadlineMs: number
   ) =>
     | "created"
     | "existing"
@@ -83,6 +86,7 @@ export type LanServerOptions = {
   globalTransferLimit?: number;
   perClientTransferLimit?: number;
   requestInactivityMs?: number;
+  operationTimeoutMs?: number;
 };
 
 export const createLanServerAuthenticator = (options: {
@@ -263,8 +267,10 @@ const spoolBody = async (
   request: IncomingMessage,
   expectedBytes: number,
   maximumBytes: number,
-  destination: string
+  destination: string,
+  deadlineMs: number
 ): Promise<string> => {
+  if (Date.now() >= deadlineMs) throw new LanOperationTimeoutError();
   if (expectedBytes <= 0 || expectedBytes > maximumBytes) {
     throw new Error("body-size-invalid");
   }
@@ -288,9 +294,46 @@ const spoolBody = async (
     }
     hash.update(chunk);
   });
-  await pipeline(request, output);
+  const timeout = setTimeout(() => {
+    request.destroy(new LanOperationTimeoutError());
+  }, Math.max(1, deadlineMs - Date.now()));
+  try {
+    await pipeline(request, output);
+  } finally {
+    clearTimeout(timeout);
+  }
   if (received !== expectedBytes) throw new Error("body-truncated");
   return hash.digest("hex");
+};
+
+class LanOperationTimeoutError extends Error {
+  constructor() {
+    super("LAN server operation exceeded its deadline");
+  }
+}
+
+const awaitBeforeDeadline = async <T>(
+  operation: Promise<T>,
+  deadlineMs: number
+): Promise<T> => {
+  const remainingMs = deadlineMs - Date.now();
+  if (remainingMs <= 0) throw new LanOperationTimeoutError();
+  let timeout: NodeJS.Timeout | null = null;
+  try {
+    const value = await Promise.race([
+      operation,
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(
+          () => reject(new LanOperationTimeoutError()),
+          remainingMs
+        );
+      }),
+    ]);
+    if (Date.now() >= deadlineMs) throw new LanOperationTimeoutError();
+    return value;
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 };
 
 const isStrictRequestTarget = (target: string): boolean =>
@@ -358,6 +401,13 @@ export const startLanServer = async (
   const globalLimit = options.globalTransferLimit ?? 8;
   const perClientLimit = options.perClientTransferLimit ?? 4;
   const inactivityMs = options.requestInactivityMs ?? 5_000;
+  const operationTimeoutMs = Math.max(
+    1,
+    Math.min(
+      options.operationTimeoutMs ?? MAX_OPERATION_TIMEOUT_MS,
+      MAX_OPERATION_TIMEOUT_MS
+    )
+  );
   let closePromise: Promise<void> | null = null;
 
   const server = https.createServer(
@@ -372,6 +422,7 @@ export const startLanServer = async (
       keepAliveTimeout: 1,
     },
     async (request, response) => {
+      const requestDeadlineMs = Date.now() + operationTimeoutMs;
       response.on("error", () => {});
       try {
         if (closing || !request.url || !framingIsSafe(request)) {
@@ -559,9 +610,13 @@ export const startLanServer = async (
         }
         globalActive += 1;
         activeByClient.set(client.clientId, clientActive + 1);
+        let finishAfter: Promise<void> = Promise.resolve();
         const transferLock = options.transferLocksRoot
           ? await acquireEntryLock(options.transferLocksRoot, entryId, {
-              maxWaitMs: inactivityMs,
+              maxWaitMs: Math.max(
+                1,
+                Math.min(inactivityMs, requestDeadlineMs - Date.now())
+              ),
               retryIntervalMs: 25,
             })
           : null;
@@ -579,39 +634,87 @@ export const startLanServer = async (
               options.incomingDirectory,
               `${entryId}-${crypto.randomUUID()}.wire`
             );
+            let removeIncomingImmediately = true;
             try {
               const digest = await spoolBody(
                 request,
                 contentLength,
                 MAX_ENTRY_BYTES,
-                incomingPath
+                incomingPath,
+                requestDeadlineMs
               );
               if (digest !== fields!.contentSha256) {
                 sendEmpty(response, 400);
                 return;
               }
-              const outcome = await options.importEntry(
-                platform,
-                entryId,
-                incomingPath,
-                transferLock ?? undefined
+              const importOperation = Promise.resolve().then(() =>
+                options.importEntry(
+                  platform,
+                  entryId,
+                  incomingPath,
+                  transferLock ?? undefined,
+                  requestDeadlineMs
+                )
               );
+              let outcome: "created" | "existing" | "conflict";
+              try {
+                outcome = await awaitBeforeDeadline(
+                  importOperation,
+                  requestDeadlineMs
+                );
+              } catch (error) {
+                if (error instanceof LanOperationTimeoutError) {
+                  removeIncomingImmediately = false;
+                  finishAfter = importOperation.then(
+                    () => fs.rmSync(incomingPath, { force: true }),
+                    () => fs.rmSync(incomingPath, { force: true })
+                  );
+                }
+                throw error;
+              }
+              if (Date.now() >= requestDeadlineMs) {
+                throw new LanOperationTimeoutError();
+              }
               sendEmpty(
                 response,
                 outcome === "created" ? 201 : outcome === "existing" ? 204 : 409
               );
             } finally {
-              fs.rmSync(incomingPath, { force: true });
+              if (removeIncomingImmediately) {
+                fs.rmSync(incomingPath, { force: true });
+              }
             }
             return;
           }
 
-          const prepared = await options.prepareEntry(platform, entryId);
+          const prepareOperation = Promise.resolve().then(() =>
+            options.prepareEntry(platform, entryId, requestDeadlineMs)
+          );
+          let prepared: PreparedLanEntry | null;
+          try {
+            prepared = await awaitBeforeDeadline(
+              prepareOperation,
+              requestDeadlineMs
+            );
+          } catch (error) {
+            if (error instanceof LanOperationTimeoutError) {
+              finishAfter = prepareOperation.then(
+                async (latePrepared) => {
+                  await latePrepared?.cleanup?.();
+                },
+                () => {}
+              );
+            }
+            throw error;
+          }
           if (!prepared) {
             rejectRequest(request, response, 404);
             return;
           }
           try {
+            if (Date.now() >= requestDeadlineMs) {
+              throw new LanOperationTimeoutError();
+            }
             if (
               !Number.isSafeInteger(prepared.sizeBytes) ||
               prepared.sizeBytes <= 0 ||
@@ -650,23 +753,39 @@ export const startLanServer = async (
               response.destroy(new Error("Prepared LAN package changed"));
               return;
             }
-            await pipeline(
-              fs.createReadStream("", { fd: descriptor, autoClose: true }),
-              response
-            );
+            const source = fs.createReadStream("", {
+              fd: descriptor,
+              autoClose: true,
+            });
+            const timeout = setTimeout(() => {
+              source.destroy(new LanOperationTimeoutError());
+              response.destroy(new LanOperationTimeoutError());
+            }, Math.max(1, requestDeadlineMs - Date.now()));
+            try {
+              await pipeline(source, response);
+            } finally {
+              clearTimeout(timeout);
+            }
           } finally {
             await prepared.cleanup?.();
           }
         } finally {
-          if (transferLock) releaseEntryLock(transferLock);
-          globalActive -= 1;
-          const remaining = (activeByClient.get(client.clientId) ?? 1) - 1;
-          if (remaining <= 0) activeByClient.delete(client.clientId);
-          else activeByClient.set(client.clientId, remaining);
+          const finishTransfer = (): void => {
+            if (transferLock) releaseEntryLock(transferLock);
+            globalActive -= 1;
+            const remaining = (activeByClient.get(client.clientId) ?? 1) - 1;
+            if (remaining <= 0) activeByClient.delete(client.clientId);
+            else activeByClient.set(client.clientId, remaining);
+          };
+          void finishAfter.then(finishTransfer, finishTransfer);
         }
-      } catch {
-        if (!response.headersSent) sendEmpty(response, 500);
-        else response.destroy();
+      } catch (error) {
+        if (!response.headersSent) {
+          sendEmpty(
+            response,
+            error instanceof LanOperationTimeoutError ? 503 : 500
+          );
+        } else response.destroy();
       }
     }
   );

@@ -451,8 +451,12 @@ export const fetchLanEntry = async (
 };
 
 const openHashedFile = (
-  filename: string
+  filename: string,
+  deadlineMs?: number
 ): { descriptor: number; sizeBytes: number; sha256: string } => {
+  if (deadlineMs !== undefined && Date.now() >= deadlineMs) {
+    throw new Error("LAN upload exceeded its deadline");
+  }
   const descriptor = fs.openSync(
     filename,
     fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW
@@ -466,6 +470,9 @@ const openHashedFile = (
     const buffer = Buffer.allocUnsafe(64 * 1024);
     let read = 0;
     while (read < stats.size) {
+      if (deadlineMs !== undefined && Date.now() >= deadlineMs) {
+        throw new Error("LAN upload exceeded its deadline");
+      }
       const count = fs.readSync(
         descriptor,
         buffer,
@@ -496,9 +503,13 @@ export const putLanEntry = async (
   options: { signer?: LanRequestSigner; timeoutMs?: number } = {}
 ): Promise<"created" | "existing" | "conflict"> => {
   const pathname = assertEntryIdentity(platform, entryId);
-  const packageInfo = openHashedFile(packagePath);
+  const timeoutMs = Math.max(1, options.timeoutMs ?? 30_000);
+  const deadlineMs = Date.now() + timeoutMs;
+  const packageInfo = openHashedFile(packagePath, deadlineMs);
   let streamOwnsDescriptor = false;
   try {
+    const remainingMs = deadlineMs - Date.now();
+    if (remainingMs <= 0) throw new Error("LAN upload exceeded its deadline");
     const { request, response } = await openPinnedRequest({
       peer,
       method: "PUT",
@@ -515,7 +526,7 @@ export const putLanEntry = async (
         "content-type": "application/vnd.eas-local-cache.wire",
         "if-none-match": "*",
       },
-      overallTimeoutMs: options.timeoutMs ?? 30_000,
+      overallTimeoutMs: remainingMs,
     });
     const packageStream = fs.createReadStream("", {
       fd: packageInfo.descriptor,

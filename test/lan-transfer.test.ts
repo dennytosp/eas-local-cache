@@ -318,4 +318,24 @@ describe("atomic LAN transfer import", () => {
     expect(fs.readdirSync(paths.transferStagingRoot)).toEqual([]);
     expect(fs.readdirSync(paths.transferLocksRoot)).toEqual([]);
   });
+
+  it("does not inspect or publish a package after its absolute import deadline", async () => {
+    const source = project("source");
+    const target = project("target");
+    const transfer = await publish(source, "expired-import", "artifact");
+
+    await expect(
+      importWirePackage({
+        projectRoot: target,
+        packagePath: transfer.wirePath,
+        expectedPlatform: "android",
+        expectedEntryId: transfer.entryId,
+        deadlineMs: Date.now(),
+      })
+    ).rejects.toThrow("import exceeded its deadline");
+    const paths = getCachePaths(target);
+    expect(
+      fs.existsSync(getEntryDirectory(paths, "android", transfer.entryId))
+    ).toBe(false);
+  });
 });

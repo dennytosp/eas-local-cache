@@ -35,7 +35,8 @@ export type WireImportResult = {
 const writeExclusiveFile = (
   filePath: string,
   contents: Buffer,
-  mode = 0o600
+  mode = 0o600,
+  deadlineMs?: number
 ): void => {
   const descriptor = fs.openSync(
     filePath,
@@ -48,6 +49,9 @@ const writeExclusiveFile = (
   try {
     let offset = 0;
     while (offset < contents.length) {
+      if (deadlineMs !== undefined && Date.now() >= deadlineMs) {
+        throw new Error("LAN cache import exceeded its deadline");
+      }
       const count = fs.writeSync(
         descriptor,
         contents,
@@ -65,8 +69,12 @@ const writeExclusiveFile = (
 
 const copyWireBody = (
   inspected: InspectedWirePackage,
-  destination: string
+  destination: string,
+  deadlineMs?: number
 ): void => {
+  if (deadlineMs !== undefined && Date.now() >= deadlineMs) {
+    throw new Error("LAN cache import exceeded its deadline");
+  }
   const pathStats = fs.lstatSync(inspected.packagePath);
   if (pathStats.isSymbolicLink() || !pathStats.isFile()) {
     throw new Error("Wire package must remain a regular file during import");
@@ -100,6 +108,9 @@ const copyWireBody = (
     );
     let copied = 0;
     while (copied < inspected.header.body.sizeBytes) {
+      if (deadlineMs !== undefined && Date.now() >= deadlineMs) {
+        throw new Error("LAN cache import exceeded its deadline");
+      }
       const count = fs.readSync(
         source,
         buffer,
@@ -112,6 +123,9 @@ const copyWireBody = (
       hash.update(chunk);
       let written = 0;
       while (written < chunk.length) {
+        if (deadlineMs !== undefined && Date.now() >= deadlineMs) {
+          throw new Error("LAN cache import exceeded its deadline");
+        }
         const writeCount = fs.writeSync(
           output,
           chunk,
@@ -285,16 +299,33 @@ export const importWirePackage = async (input: {
   expectedPlatform: CachePlatform;
   expectedEntryId: string;
   maxWaitMs?: number;
+  deadlineMs?: number;
   transferLock?: EntryLock;
   replaceCompressedUnavailable?: {
     payloadDigest: string;
   };
 }): Promise<WireImportResult> => {
+  const deadlineMs = Math.min(
+    input.deadlineMs ?? Number.MAX_SAFE_INTEGER,
+    Date.now() + Math.max(1, input.maxWaitMs ?? 45_000)
+  );
+  const assertDeadline = (): void => {
+    if (Date.now() >= deadlineMs) {
+      throw new Error("LAN cache import exceeded its deadline");
+    }
+  };
+  const remainingMs = (): number => {
+    assertDeadline();
+    return Math.max(1, deadlineMs - Date.now());
+  };
+  assertDeadline();
   const inspected = inspectWirePackage({
     packagePath: input.packagePath,
     expectedPlatform: input.expectedPlatform,
     expectedEntryId: input.expectedEntryId,
+    deadlineMs,
   });
+  assertDeadline();
   const managedProjectRoot = fs.realpathSync(input.projectRoot);
   const paths = getCachePaths(managedProjectRoot);
   ensureProviderRoot(managedProjectRoot, paths.providerRoot);
@@ -314,7 +345,7 @@ export const importWirePackage = async (input: {
   const transferLock =
     input.transferLock ??
     (await acquireEntryLock(paths.transferLocksRoot, inspected.header.entryId, {
-      maxWaitMs: input.maxWaitMs ?? 45_000,
+      maxWaitMs: remainingMs(),
       retryIntervalMs: 50,
     }));
   if (!transferLock) {
@@ -335,13 +366,15 @@ export const importWirePackage = async (input: {
       validation.manifest.payload.integrity.digest;
   let stagingDirectory: string | null = null;
   try {
+    assertDeadline();
     if (pathExists(entryDirectory)) {
       const existing = validateEntry(
         entryDirectory,
         paths.providerRoot,
         inspected.header.platform,
         inspected.manifest.fingerprintHash,
-        inspected.header.entryId
+        inspected.header.entryId,
+        { deadlineMs }
       );
       if (existing.valid && !mayReplaceCompressed(existing)) {
         return existingResult({
@@ -354,10 +387,11 @@ export const importWirePackage = async (input: {
     stagingDirectory = fs.mkdtempSync(
       path.join(paths.transferStagingRoot, `${inspected.header.entryId}-`)
     );
+    assertDeadline();
     const artifactName = getArtifactName(inspected.header.platform);
     if (inspected.header.body.kind === "elc-app-tree-v1") {
       const archivePath = path.join(stagingDirectory, "artifact.app.elcapp1");
-      copyWireBody(inspected, archivePath);
+      copyWireBody(inspected, archivePath, deadlineMs);
       try {
         await extractAppTree(
           archivePath,
@@ -366,7 +400,8 @@ export const importWirePackage = async (input: {
             sizeBytes: inspected.manifest.artifact.sizeBytes,
             fileCount: inspected.manifest.artifact.fileCount,
             maxArchiveBytes: inspected.header.body.sizeBytes,
-          }
+          },
+          { deadlineMs }
         );
       } finally {
         fs.rmSync(archivePath, { force: true });
@@ -377,11 +412,17 @@ export const importWirePackage = async (input: {
         inspected.manifest.schemaVersion === 2
           ? inspected.manifest.payload.relativePath
           : artifactName;
-      copyWireBody(inspected, path.join(stagingDirectory, bodyName));
+      copyWireBody(
+        inspected,
+        path.join(stagingDirectory, bodyName),
+        deadlineMs
+      );
     }
     writeExclusiveFile(
       path.join(stagingDirectory, "manifest.json"),
-      inspected.manifestBytes
+      inspected.manifestBytes,
+      0o600,
+      deadlineMs
     );
 
     const stagedValidation = validateEntry(
@@ -389,7 +430,8 @@ export const importWirePackage = async (input: {
       paths.providerRoot,
       inspected.header.platform,
       inspected.manifest.fingerprintHash,
-      inspected.header.entryId
+      inspected.header.entryId,
+      { deadlineMs }
     );
     if (!stagedValidation.valid) {
       throw new Error(
@@ -402,19 +444,21 @@ export const importWirePackage = async (input: {
     const entryLock = await acquireEntryLock(
       paths.locksRoot,
       inspected.header.entryId,
-      { maxWaitMs: input.maxWaitMs ?? 30_000, retryIntervalMs: 50 }
+      { maxWaitMs: remainingMs(), retryIntervalMs: 50 }
     );
     if (!entryLock) {
       throw new Error("Timed out waiting to publish the LAN cache entry");
     }
     try {
+      assertDeadline();
       if (pathExists(entryDirectory)) {
         const existing = validateEntry(
           entryDirectory,
           paths.providerRoot,
           inspected.header.platform,
           inspected.manifest.fingerprintHash,
-          inspected.header.entryId
+          inspected.header.entryId,
+          { deadlineMs }
         );
         if (existing.valid && !mayReplaceCompressed(existing)) {
           return existingResult({
@@ -423,6 +467,7 @@ export const importWirePackage = async (input: {
           });
         }
         if (!existing.valid) {
+          assertDeadline();
           quarantineInvalidEntry({
             providerRoot: paths.providerRoot,
             quarantineRoot: paths.quarantineRoot,
@@ -437,6 +482,7 @@ export const importWirePackage = async (input: {
             reason: existing.reason,
           });
         } else {
+          assertDeadline();
           ensureManagedDirectory(paths.providerRoot, paths.trashRoot);
           const tombstone = path.join(
             paths.trashRoot,
@@ -452,10 +498,12 @@ export const importWirePackage = async (input: {
           const restoreTombstone = `${tombstone}-restore`;
           let movedRestore = false;
           if (pathExists(restoreDirectory)) {
+            assertDeadline();
             fs.renameSync(restoreDirectory, restoreTombstone);
             movedRestore = true;
           }
           try {
+            assertDeadline();
             fs.renameSync(entryDirectory, tombstone);
             try {
               fs.renameSync(stagingDirectory, entryDirectory);
@@ -501,6 +549,7 @@ export const importWirePackage = async (input: {
         }
       }
       if (stagingDirectory) {
+        assertDeadline();
         fs.renameSync(stagingDirectory, entryDirectory);
         stagingDirectory = null;
       }

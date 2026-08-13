@@ -202,11 +202,13 @@ context, so the first safe-mode build is an intentional cold miss. Discovery is
 bounded, read-only, and fail-open: an unavailable required signal simply makes
 Expo perform an uncached build.
 
-After a successful upload, automatic maintenance removes expired data first and
+After a successful upload, LAN import, materialized restore, or a periodically
+throttled ordinary hit, automatic maintenance removes expired data first and
 then least-recently-used entries until the size and entry-count soft caps are
-satisfied. Expired materialized restores are reclaimed as well, and deleting a
-compressed source entry also deletes its corresponding restore. The new
-artifact, recently returned artifacts, and active builds are protected.
+satisfied. The hit throttle is persisted across Expo CLI processes, while a
+policy change bypasses it. Expired materialized restores are reclaimed as well,
+and deleting a compressed source entry also deletes its corresponding restore.
+The new artifact, recently returned artifacts, and active builds are protected.
 Maintenance failure never turns a successful native build into an error. The
 size cap covers valid and invalid entries, upload and restore staging,
 materialized restores, quarantine, and trash. Operational metadata and
@@ -226,12 +228,14 @@ npx eas-local-cache prune --max-size 10GB --max-entries 20 --retention-days 7
 ```
 
 Every command accepts `--project-root <path>` and `--json` for automation.
-`list` identifies each entry's `none` or `zstd` encoding; JSON output also
-includes logical, payload, gross-savings, and materialized-restore byte counts.
-`stats --json` aggregates compressed entry count, gross saved bytes, restore
-bytes, and net saved bytes. `doctor` performs the same identity and integrity
-checks used by cache resolution without changing the cache. `prune --dry-run`
-uses the same planner as real and automatic cleanup, including restore data.
+`list` is newest-first and identifies each entry's `none` or `zstd` encoding;
+JSON output also includes logical, payload, gross-savings, and
+materialized-restore byte counts. `stats` highlights the latest cached build,
+while `stats --json` exposes it as `latestBuild` and aggregates compressed entry
+count, gross saved bytes, restore bytes, and net saved bytes. `doctor` performs
+the same identity and integrity checks used by cache resolution without changing
+the cache. `prune --dry-run` uses the same planner as real and automatic cleanup,
+including restore data.
 Stats also report exact bytes and counts plus hit rate for retained local
 decisions. Estimated time saved uses a conservative native-artifact timestamp
 sample; a hit without reliable timing remains explicitly unknown. Telemetry is

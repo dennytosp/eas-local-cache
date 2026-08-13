@@ -26,6 +26,7 @@ const UPLOAD_BUDGET_MS = 30_000;
 const MAX_PEERS = 8;
 const MAX_PROBES = 3;
 const PROBE_TIMEOUT_MS = 10_000;
+const DISCOVERY_WINDOW_MS = 300;
 
 const hardenTransferDirectory = (directory: string): void => {
   if (process.platform !== "win32") fs.chmodSync(directory, 0o700);
@@ -82,7 +83,7 @@ const probeBatch = async (
   let cursor = 0;
   await Promise.all(
     Array.from({ length: Math.min(MAX_PROBES, peers.length) }, async () => {
-      while (cursor < peers.length) {
+      while (cursor < peers.length && Date.now() < deadline) {
         const peer = peers[cursor++]!;
         const started = Date.now();
         try {
@@ -123,8 +124,10 @@ const localEntryIsValid = (input: {
   entriesRoot: string;
   platform: CachePlatform;
   entryId: string;
+  deadlineMs: number;
   replaceCompressedPayloadDigest?: string;
 }): boolean => {
+  if (Date.now() >= input.deadlineMs) return false;
   const entryDirectory = path.join(
     input.entriesRoot,
     input.platform,
@@ -144,7 +147,8 @@ const localEntryIsValid = (input: {
       input.providerRoot,
       input.platform,
       manifest.fingerprintHash,
-      input.entryId
+      input.entryId,
+      { deadlineMs: input.deadlineMs }
     ).valid;
   } catch {
     return false;
@@ -183,6 +187,7 @@ export const fetchLanEntryToLocal = async (input: {
         entriesRoot: paths.entriesRoot,
         platform: input.platform,
         entryId: input.entryId,
+        deadlineMs: deadline,
         ...(input.replaceCompressedPayloadDigest
           ? {
               replaceCompressedPayloadDigest:
@@ -198,7 +203,13 @@ export const fetchLanEntryToLocal = async (input: {
     try {
       const { discoverPairedEndpoints } = await import("./discovery.js");
       const discovered = await discoverPairedEndpoints(
-        basePeers.map((peer) => peer.peerId)
+        basePeers.map((peer) => peer.peerId),
+        {
+          windowMs: Math.min(
+            DISCOVERY_WINDOW_MS,
+            Math.max(0, deadline - Date.now())
+          ),
+        }
       );
       const byId = new Map(
         discovered.map((endpoint) => [endpoint.serverId, endpoint])
@@ -238,7 +249,7 @@ export const fetchLanEntryToLocal = async (input: {
           packagePath,
           expectedPlatform: input.platform,
           expectedEntryId: input.entryId,
-          maxWaitMs: Math.max(1, deadline - Date.now()),
+          deadlineMs: deadline,
           transferLock,
           ...(input.replaceCompressedPayloadDigest
             ? {
@@ -255,6 +266,7 @@ export const fetchLanEntryToLocal = async (input: {
             entriesRoot: paths.entriesRoot,
             platform: input.platform,
             entryId: input.entryId,
+            deadlineMs: deadline,
             replaceCompressedPayloadDigest:
               input.replaceCompressedPayloadDigest,
           })

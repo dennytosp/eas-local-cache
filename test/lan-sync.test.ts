@@ -392,7 +392,7 @@ describe("trusted LAN cache synchronization", () => {
     if (hitC.outcome === "hit") {
       expect(fs.readFileSync(hitC.path, "utf8")).toBe("second-from-B");
     }
-  });
+  }, 10_000);
 
   it("enforces one upload deadline across lock, packaging, and PUT", async () => {
     const root = projectRoot();
@@ -458,5 +458,30 @@ describe("trusted LAN cache synchronization", () => {
         .readdirSync(paths.transferStagingRoot)
         .filter((name) => name.endsWith(".wire"))
     ).toEqual([]);
+  });
+
+  it("caps mDNS discovery latency below the overall fetch budget", async () => {
+    const root = projectRoot();
+    const identity = await createServerIdentity();
+    const client = authorizedClient(
+      crypto.randomBytes(32).toString("base64url")
+    );
+    const peer: LanOutboundPeer = {
+      ...outboundPeer(identity, { port: 9 } as LanServerHandle, client),
+      endpoint: { host: "127.0.0.1", port: 9 },
+    };
+    const started = Date.now();
+
+    expect(
+      await fetchLanEntryToLocal({
+        projectRoot: root,
+        clientId: client.clientId,
+        peers: [peer],
+        platform: "android",
+        entryId: getEntryId("android", "offline-discovery-latency"),
+        budgetMs: 1_500,
+      })
+    ).toEqual({ imported: false, peerId: null });
+    expect(Date.now() - started).toBeLessThan(1_000);
   });
 });

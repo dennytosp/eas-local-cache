@@ -453,7 +453,11 @@ const checkedSum = (values: Iterable<number>, label: string): number => {
 const formatSignedSize = (bytes: number): string =>
   bytes < 0 ? `-${formatSizeBytes(Math.abs(bytes))}` : formatSizeBytes(bytes);
 
-const sha256RegularFile = (filePath: string, expectedBytes: number): string => {
+const sha256RegularFile = (
+  filePath: string,
+  expectedBytes: number,
+  deadlineMs?: number
+): string => {
   const descriptor = fs.openSync(
     filePath,
     fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW
@@ -467,6 +471,9 @@ const sha256RegularFile = (filePath: string, expectedBytes: number): string => {
     const buffer = Buffer.allocUnsafe(1024 * 1024);
     let offset = 0;
     while (offset < stats.size) {
+      if (deadlineMs !== undefined && Date.now() >= deadlineMs) {
+        throw new Error("LAN wire package hashing exceeded its deadline");
+      }
       const count = fs.readSync(
         descriptor,
         buffer,
@@ -696,10 +703,11 @@ const runServeCommand = async (parsed: ParsedArguments): Promise<number> => {
     allowWrite: parsed.allowWrite,
     incomingDirectory: paths.transferStagingRoot,
     transferLocksRoot: paths.transferLocksRoot,
+    operationTimeoutMs: 45_000,
     authenticate: coordinator.authenticate,
     ...(window ? { pair: coordinator.pair } : {}),
     ...(window ? { acknowledgePairing: coordinator.acknowledgePairing } : {}),
-    prepareEntry: async (platform, entryId) => {
+    prepareEntry: async (platform, entryId, deadlineMs) => {
       ensureManagedDirectory(paths.providerRoot, paths.transferStagingRoot);
       const packagePath = path.join(
         paths.transferStagingRoot,
@@ -711,11 +719,16 @@ const runServeCommand = async (parsed: ParsedArguments): Promise<number> => {
           platform,
           entryId,
           outputPath: packagePath,
+          deadlineMs,
         });
         return {
           packagePath,
           sizeBytes: inspected.totalBytes,
-          sha256: sha256RegularFile(packagePath, inspected.totalBytes),
+          sha256: sha256RegularFile(
+            packagePath,
+            inspected.totalBytes,
+            deadlineMs
+          ),
           cleanup: () => fs.rmSync(packagePath, { force: true }),
         };
       } catch {
@@ -723,12 +736,19 @@ const runServeCommand = async (parsed: ParsedArguments): Promise<number> => {
         return null;
       }
     },
-    importEntry: async (platform, entryId, packagePath, transferLock) => {
+    importEntry: async (
+      platform,
+      entryId,
+      packagePath,
+      transferLock,
+      deadlineMs
+    ) => {
       const imported = await importModule.importWirePackage({
         projectRoot: parsed.projectRoot,
         packagePath,
         expectedPlatform: platform,
         expectedEntryId: entryId,
+        deadlineMs,
         ...(transferLock ? { transferLock } : {}),
       });
       if (imported.status === "imported") return "created";
@@ -827,9 +847,15 @@ export const runCli = async (arguments_: string[]): Promise<number> => {
 
     const catalog = inventoryCache(parsed.projectRoot);
     if (parsed.command === "list") {
-      const entries = catalog.entries
+      const entries = [...catalog.entries]
         .filter(
           (entry) => !parsed.platform || entry.platform === parsed.platform
+        )
+        .sort(
+          (left, right) =>
+            Date.parse(right.createdAt) - Date.parse(left.createdAt) ||
+            left.platform.localeCompare(right.platform) ||
+            left.entryId.localeCompare(right.entryId)
         )
         .map((entry) => ({
           platform: entry.platform,
@@ -907,9 +933,26 @@ export const runCli = async (arguments_: string[]): Promise<number> => {
         catalog.entries.map((entry) => entry.grossCompressionSavedBytes),
         "Compression savings"
       );
+      const latestEntry = [...catalog.entries].sort(
+        (left, right) =>
+          Date.parse(right.createdAt) - Date.parse(left.createdAt) ||
+          left.platform.localeCompare(right.platform) ||
+          left.entryId.localeCompare(right.entryId)
+      )[0];
       const output = {
         entryCount: catalog.entries.length,
         legacyEntryCount: catalog.legacyEntries.length,
+        latestBuild: latestEntry
+          ? {
+              platform: latestEntry.platform,
+              entryId: latestEntry.entryId,
+              fingerprint: latestEntry.fingerprintHash.slice(0, 12),
+              createdAt: latestEntry.createdAt,
+              lastAccessedAt: latestEntry.lastAccessedAt,
+              sizeBytes: latestEntry.sizeBytes,
+              encoding: latestEntry.encoding,
+            }
+          : null,
         entriesByPlatform: {
           android: catalog.entries.filter(
             (entry) => entry.platform === "android"
@@ -956,6 +999,11 @@ export const runCli = async (arguments_: string[]): Promise<number> => {
           )} (${output.entriesByPlatform.ios} iOS, ${
             output.entriesByPlatform.android
           } Android)`
+        );
+        console.log(
+          output.latestBuild === null
+            ? "Latest build: unavailable (no versioned cache entries)"
+            : `Latest build: ${output.latestBuild.platform} ${output.latestBuild.fingerprint} created ${output.latestBuild.createdAt}`
         );
         console.log(
           `Apparent managed cache bytes: ${formatSizeBytes(

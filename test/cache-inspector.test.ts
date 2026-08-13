@@ -15,7 +15,7 @@ import {
   getEntryId,
   getRestoreDirectory,
 } from "../src/cache/paths";
-import { readManifest } from "../src/cache/manifest";
+import { readManifest, writeManifest } from "../src/cache/manifest";
 import {
   resolveCacheEntryDetailed,
   uploadCacheEntry,
@@ -864,6 +864,10 @@ describe("doctor and CLI", () => {
       const parsed = JSON.parse(output) as Record<string, unknown>;
       if (command === "stats") {
         expect(parsed.entryCount).toBe(1);
+        expect(parsed.latestBuild).toMatchObject({
+          platform: "android",
+          fingerprint: "cli",
+        });
         expect(parsed.hitRate).toBeNull();
         expect(parsed.estimatedTimeSavedMs).toBeNull();
       } else {
@@ -871,6 +875,88 @@ describe("doctor and CLI", () => {
         expect(parsed.legacyEntries).toEqual([]);
       }
     }
+  });
+
+  it("reports the latest build and lists entries newest-first with deterministic ties", async () => {
+    const oldest = await seedEntry(
+      "oldest",
+      "oldest",
+      "2026-08-13T04:00:00.000Z"
+    );
+    const tiedA = await seedEntry(
+      "tied-a",
+      "tied-a",
+      "2026-08-13T03:00:00.000Z"
+    );
+    const tiedB = await seedEntry(
+      "tied-b",
+      "tied-b",
+      "2026-08-13T02:00:00.000Z"
+    );
+    const createdAt = new Map([
+      [oldest.entryId, "2026-08-11T00:00:00.000Z"],
+      [tiedA.entryId, "2026-08-12T00:00:00.000Z"],
+      [tiedB.entryId, "2026-08-12T00:00:00.000Z"],
+    ]);
+    for (const [entryId, timestamp] of createdAt) {
+      const entryDirectory = path.join(
+        oldest.paths.entriesRoot,
+        "android",
+        entryId
+      );
+      writeManifest(entryDirectory, {
+        ...readManifest(entryDirectory),
+        createdAt: timestamp,
+      });
+    }
+
+    const readJson = async (command: "stats" | "list") => {
+      let output = "";
+      const write = spyOn(process.stdout, "write").mockImplementation(((
+        chunk: string | Uint8Array
+      ) => {
+        output += chunk.toString();
+        return true;
+      }) as typeof process.stdout.write);
+      expect(
+        await runCli([command, "--project-root", projectRoot, "--json"])
+      ).toBe(0);
+      write.mockRestore();
+      return JSON.parse(output) as {
+        latestBuild: { entryId: string; createdAt: string };
+        entries: Array<{ entryId: string; createdAt: string }>;
+      };
+    };
+
+    const expectedTies = [tiedA.entryId, tiedB.entryId].sort();
+    const list = await readJson("list");
+    expect(list.entries.map((entry) => entry.entryId)).toEqual([
+      ...expectedTies,
+      oldest.entryId,
+    ]);
+    const stats = await readJson("stats");
+    const expectedFingerprint =
+      expectedTies[0] === tiedA.entryId ? "tied-a" : "tied-b";
+    expect(stats.latestBuild).toMatchObject({
+      entryId: expectedTies[0],
+      createdAt: "2026-08-12T00:00:00.000Z",
+    });
+
+    const log = spyOn(console, "log").mockImplementation(() => {});
+    expect(await runCli(["stats", "--project-root", projectRoot])).toBe(0);
+    expect(log).toHaveBeenCalledWith(
+      `Latest build: android ${expectedFingerprint} created 2026-08-12T00:00:00.000Z`
+    );
+    log.mockRestore();
+  });
+
+  it("prints an explicit unavailable latest build for an empty cache", async () => {
+    const log = spyOn(console, "log").mockImplementation(() => {});
+    expect(await runCli(["stats", "--project-root", projectRoot])).toBe(0);
+    expect(log).toHaveBeenCalledWith(
+      "Latest build: unavailable (no versioned cache entries)"
+    );
+    log.mockRestore();
   });
 
   it("reports exact compression and restore storage in stats and list JSON", async () => {
