@@ -4,6 +4,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import * as tls from "tls";
+import Bonjour from "bonjour-service";
 
 import { createAuthHeaders } from "../src/lan/auth";
 import { createServerIdentity } from "../src/lan/certificate";
@@ -356,22 +357,37 @@ describe("authenticated HTTPS LAN transport", () => {
 });
 
 describe("LAN discovery hints", () => {
-  it("publishes and discovers a paired peer through real mDNS", async () => {
+  it("publishes and discovers a paired peer through real Bonjour transport", async () => {
     const peerId = crypto.randomBytes(32).toString("hex");
     const port = 20_000 + crypto.randomInt(20_000);
+    // Exercise Bonjour's actual DNS-SD socket and registry over private
+    // unicast loopback. Hosted runners commonly block multicast loopback,
+    // which would otherwise turn this into a test of the runner network.
+    const bonjour = new Bonjour({
+      ip: "127.0.0.1",
+      multicast: false,
+      port: 40_000 + crypto.randomInt(20_000),
+    } as never);
     const advertisement = advertiseLanPeer({
       serverId: peerId,
       port,
       allowWrite: true,
       host: "127.0.0.1",
+      factory: () => bonjour,
     });
 
     try {
       // Bonjour probes before announcing. Give the publisher time to become
-      // visible so this test exercises the real multicast transport.
+      // visible before browsing on the same real DNS-SD transport.
       await new Promise<void>((resolve) => setTimeout(resolve, 750));
       const endpoints = await discoverPairedEndpoints([peerId], {
-        windowMs: 2_500,
+        windowMs: 1_000,
+        factory: () => ({
+          publish: bonjour.publish.bind(bonjour),
+          find: bonjour.find.bind(bonjour),
+          // The advertisement owns and closes the shared socket below.
+          destroy: (callback?: () => void) => callback?.(),
+        }),
       });
 
       expect(endpoints).toHaveLength(1);
@@ -385,7 +401,7 @@ describe("LAN discovery hints", () => {
     } finally {
       await advertisement.stop();
     }
-  }, 8_000);
+  });
 
   it("accepts only private endpoints belonging to a uniquely paired prefix", () => {
     const peerId = "d".repeat(64);
