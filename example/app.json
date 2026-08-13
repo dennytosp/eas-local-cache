@@ -38,7 +38,7 @@
         "maxEntries": 50,
         "retentionDays": 14,
         "autoPrune": true,
-        "toolchain": "safe",
+        "toolchain": "off",
         "compression": "off",
         "lan": "off"
       }

@@ -14,6 +14,7 @@
     "format:check": "prettier --check \".github/**/*.{yml,yaml}\" \".agents/**/*.md\" \"docs/**/*.md\" \"scripts/**/*.{js,mjs}\" \"src/**/*.{ts,tsx}\" \"test/**/*.{js,mjs,ts,tsx}\" package.json",
     "lint": "oxlint --deny-warnings src test",
     "typecheck": "tsc --noEmit -p tsconfig.test.json",
+    "architecture:check": "node scripts/check-architecture.mjs",
     "test": "bun test",
     "example:check": "bun run build && bun run --cwd example check",
     "prepack": "bun run build"

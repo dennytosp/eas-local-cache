@@ -123,9 +123,9 @@ describe("cache provider options", () => {
     ).toThrow();
   });
 
-  it("defaults to safe environment identity without a manual key", () => {
+  it("keeps toolchain-aware identity opt-in without a manual key", () => {
     expect(normalizeEnvironmentOptions()).toEqual({
-      toolchainMode: "safe",
+      toolchainMode: "off",
       environmentKeyDigest: null,
     });
     expect(Object.isFrozen(DEFAULT_ENVIRONMENT_OPTIONS)).toBe(true);

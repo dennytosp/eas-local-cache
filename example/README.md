@@ -10,7 +10,8 @@ runtime, so the terminal output—not the rendered screen—is the source of tru
 behavior.
 
 The example also configures the default 20 GiB, 50-entry, 14-day cleanup policy
-and keeps compression off unless a compression test explicitly opts in.
+and keeps toolchain separation, compression, and LAN sharing off unless a test
+explicitly opts in.
 
 ## Setup
 
