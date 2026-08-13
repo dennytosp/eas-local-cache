@@ -7,6 +7,9 @@ dist
 build
 *.tgz
 
+# Local design artifacts must never be committed.
+docs/superpowers/specs/
+
 # code coverage
 coverage
 *.lcov
