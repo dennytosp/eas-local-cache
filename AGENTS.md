@@ -24,6 +24,9 @@ committing. Native changes must also be exercised through the app under
 
 ## Project Boundaries
 
+- Treat `docs/superpowers/specs/` as local-only design scratch space. Never
+  stage or commit files from this directory; remove any historically tracked
+  spec from Git while preserving the local file when practical.
 - Keep the provider runtime Node-only. It must never be imported into the React
   Native application bundle.
 - Resolve every cache path from the `projectRoot` supplied by Expo, never from
