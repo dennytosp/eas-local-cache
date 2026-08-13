@@ -43,6 +43,8 @@ Status: implemented on `feat/environment-safe-cache`.
 
 ## Milestone 5: Storage Efficiency
 
+Status: implemented on `feat/compressed-cache-storage`.
+
 - Optional zstd compression for artifacts at rest
 - Bounded, atomic restore staging for Expo-compatible artifact paths
 - Compression savings visible in Cache Inspector output

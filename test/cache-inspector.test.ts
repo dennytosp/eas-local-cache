@@ -6,13 +6,21 @@ import * as path from "path";
 import { removeAccessRecord, touchAccessRecord } from "../src/cache/access";
 import { inventoryCache } from "../src/cache/catalog";
 import { planPrune, pruneCache } from "../src/cache/cleanup";
-import { doctorCache } from "../src/cache/doctor";
+import { doctorCache, doctorCacheDeep } from "../src/cache/doctor";
 import { recordResolveEvent, scanResolveEvents } from "../src/cache/events";
 import { acquireEntryLock, releaseEntryLock } from "../src/cache/lock";
 import type { NormalizedCachePolicy } from "../src/cache/options";
-import { getCachePaths, getEntryId } from "../src/cache/paths";
+import {
+  getCachePaths,
+  getEntryId,
+  getRestoreDirectory,
+} from "../src/cache/paths";
 import { readManifest } from "../src/cache/manifest";
-import { uploadCacheEntry } from "../src/cache/store";
+import {
+  resolveCacheEntryDetailed,
+  uploadCacheEntry,
+} from "../src/cache/store";
+import { discoverZstdCodec } from "../src/cache/zstd";
 import { runCli } from "../src/cli";
 
 const unlimitedPolicy: NormalizedCachePolicy = {
@@ -54,6 +62,19 @@ const seedEntry = async (
     providerRoot: paths.providerRoot,
   });
   return { artifact: artifact!, entryId, paths };
+};
+
+const seedCompressedEntry = async (fingerprint: string) => {
+  const source = path.join(projectRoot, `${fingerprint}.apk`);
+  fs.writeFileSync(source, "compressible-native-artifact".repeat(100_000));
+  const artifact = await uploadCacheEntry(
+    { projectRoot, platform: "android", fingerprintHash: fingerprint },
+    source,
+    { compressionMode: "zstd" }
+  );
+  const paths = getCachePaths(projectRoot);
+  const entryId = getEntryId("android", fingerprint);
+  return { source, artifact: artifact!, entryId, paths };
 };
 
 describe("cache catalog and cleanup", () => {
@@ -426,6 +447,137 @@ describe("cache catalog and cleanup", () => {
       releaseEntryLock(lock!);
     }
   });
+
+  it("accounts for restores exactly and evicts derived bytes before source entries", async () => {
+    if (!discoverZstdCodec()) return;
+    const seeded = await seedCompressedEntry("restore-capacity");
+    const resolved = await resolveCacheEntryDetailed({
+      projectRoot,
+      platform: "android",
+      fingerprintHash: "restore-capacity",
+    });
+    expect(resolved.outcome).toBe("hit");
+
+    const before = inventoryCache(projectRoot);
+    expect(before.restores).toHaveLength(1);
+    expect(before.restores[0]).toMatchObject({
+      entryId: seeded.entryId,
+      metadataValid: true,
+    });
+    expect(before.entries[0]!.restoreBytes).toBe(
+      before.usage.restoreCommittedBytes
+    );
+    expect(before.usage.managedBytes).toBe(
+      before.usage.entriesBytes + before.usage.restoreCommittedBytes
+    );
+
+    removeAccessRecord(
+      seeded.paths.accessRoot,
+      seeded.entryId,
+      seeded.paths.providerRoot
+    );
+    touchAccessRecord(seeded.paths.accessRoot, seeded.entryId, "android", {
+      now: new Date("2026-08-12T00:00:00.000Z"),
+      leaseMs: 0,
+      providerRoot: seeded.paths.providerRoot,
+    });
+    const result = await pruneCache(
+      projectRoot,
+      { ...unlimitedPolicy, maxSizeBytes: before.usage.entriesBytes },
+      { now: new Date("2026-08-13T00:00:00.000Z") }
+    );
+
+    expect(result.removed).toEqual([]);
+    expect(result.auxiliaryRemoved).toContainEqual(
+      expect.objectContaining({
+        category: "restore",
+        entryId: seeded.entryId,
+        reason: "max-size",
+      })
+    );
+    expect(result.remainingBytes).toBe(
+      inventoryCache(projectRoot).usage.managedBytes
+    );
+    expect(result.limitsSatisfied).toBe(true);
+    expect(fs.existsSync(seeded.artifact)).toBe(true);
+  });
+
+  it("reports and removes an associated restore when its source is pruned", async () => {
+    if (!discoverZstdCodec()) return;
+    const seeded = await seedCompressedEntry("restore-collateral");
+    expect(
+      (
+        await resolveCacheEntryDetailed({
+          projectRoot,
+          platform: "android",
+          fingerprintHash: "restore-collateral",
+        })
+      ).outcome
+    ).toBe("hit");
+    removeAccessRecord(
+      seeded.paths.accessRoot,
+      seeded.entryId,
+      seeded.paths.providerRoot
+    );
+    touchAccessRecord(seeded.paths.accessRoot, seeded.entryId, "android", {
+      now: new Date("2026-08-12T00:00:00.000Z"),
+      leaseMs: 0,
+      providerRoot: seeded.paths.providerRoot,
+    });
+
+    const dryRun = await pruneCache(
+      projectRoot,
+      { ...unlimitedPolicy, maxEntries: 0 },
+      { dryRun: true, now: new Date("2026-08-13T00:00:00.000Z") }
+    );
+    expect(dryRun.auxiliaryCandidates).toContainEqual(
+      expect.objectContaining({
+        category: "restore",
+        entryId: seeded.entryId,
+        reason: "source-removal",
+      })
+    );
+
+    const result = await pruneCache(
+      projectRoot,
+      { ...unlimitedPolicy, maxEntries: 0 },
+      { now: new Date("2026-08-13T00:00:00.000Z") }
+    );
+    expect(result.removed).toHaveLength(1);
+    expect(result.auxiliaryRemoved).toContainEqual(
+      expect.objectContaining({ category: "restore" })
+    );
+    expect(
+      fs.existsSync(
+        getRestoreDirectory(seeded.paths, "android", seeded.entryId)
+      )
+    ).toBe(false);
+    expect(result.remainingBytes).toBe(0);
+  });
+
+  it("detects and prunes orphan restore data", async () => {
+    const paths = getCachePaths(projectRoot);
+    const entryId = "a".repeat(64);
+    const orphan = getRestoreDirectory(paths, "android", entryId);
+    fs.mkdirSync(orphan, { recursive: true });
+    fs.writeFileSync(path.join(orphan, "artifact.apk"), "orphan");
+
+    const catalog = inventoryCache(projectRoot);
+    expect(catalog.issues).toContainEqual(
+      expect.objectContaining({ code: "orphan-restore", path: orphan })
+    );
+    expect(catalog.usage.restoreCommittedBytes).toBeGreaterThan(0);
+
+    const result = await pruneCache(projectRoot, unlimitedPolicy);
+    expect(result.auxiliaryRemoved).toContainEqual(
+      expect.objectContaining({
+        path: orphan,
+        category: "restore",
+        reason: "abandoned",
+      })
+    );
+    expect(fs.existsSync(orphan)).toBe(false);
+  });
 });
 
 describe("doctor and CLI", () => {
@@ -490,6 +642,99 @@ describe("doctor and CLI", () => {
     expect(fs.existsSync(entry.artifact)).toBe(true);
   });
 
+  it("validates existing restore integrity without mutating it", async () => {
+    if (!discoverZstdCodec()) return;
+    const seeded = await seedCompressedEntry("doctor-restore");
+    expect(
+      (
+        await resolveCacheEntryDetailed({
+          projectRoot,
+          platform: "android",
+          fingerprintHash: "doctor-restore",
+        })
+      ).outcome
+    ).toBe("hit");
+    const restore = getRestoreDirectory(
+      seeded.paths,
+      "android",
+      seeded.entryId
+    );
+    fs.appendFileSync(path.join(restore, "artifact.apk"), "damage");
+
+    const report = doctorCache(projectRoot);
+    expect(report.healthy).toBe(false);
+    expect(report.checkedRestores).toBe(1);
+    expect(report.issues).toContainEqual(
+      expect.objectContaining({ code: "restore-integrity-mismatch" })
+    );
+    expect(fs.existsSync(restore)).toBe(true);
+  });
+
+  it("deep doctor fails explicitly without zstd and never publishes a restore", async () => {
+    if (!discoverZstdCodec()) return;
+    const seeded = await seedCompressedEntry("doctor-deep-unavailable");
+    const restore = getRestoreDirectory(
+      seeded.paths,
+      "android",
+      seeded.entryId
+    );
+
+    const report = await doctorCacheDeep(projectRoot, { codec: null });
+
+    expect(report.deep).toBe(true);
+    expect(report.healthy).toBe(false);
+    expect(report.issues).toContainEqual(
+      expect.objectContaining({
+        code: "zstd-unavailable",
+        severity: "warning",
+      })
+    );
+    expect(fs.existsSync(restore)).toBe(false);
+  });
+
+  it("deep doctor verifies compressed data in disposable staging", async () => {
+    const codec = discoverZstdCodec();
+    if (!codec) return;
+    const seeded = await seedCompressedEntry("doctor-deep");
+    const report = await doctorCacheDeep(projectRoot, { codec });
+
+    expect(report).toMatchObject({ healthy: true, deep: true });
+    expect(
+      fs.existsSync(
+        getRestoreDirectory(seeded.paths, "android", seeded.entryId)
+      )
+    ).toBe(false);
+    expect(fs.readdirSync(seeded.paths.restoreStagingRoot)).toEqual([]);
+  });
+
+  it("exposes deep doctor through the CLI and rejects it elsewhere", async () => {
+    if (!discoverZstdCodec()) return;
+    await seedCompressedEntry("doctor-deep-cli");
+    let output = "";
+    const write = spyOn(process.stdout, "write").mockImplementation(((
+      chunk: string | Uint8Array
+    ) => {
+      output += chunk.toString();
+      return true;
+    }) as typeof process.stdout.write);
+    expect(
+      await runCli([
+        "doctor",
+        "--project-root",
+        projectRoot,
+        "--deep",
+        "--json",
+      ])
+    ).toBe(0);
+    write.mockRestore();
+    expect(JSON.parse(output)).toMatchObject({ healthy: true, deep: true });
+
+    const error = spyOn(console, "error").mockImplementation(() => {});
+    expect(await runCli(["stats", "--deep"])).toBe(2);
+    expect(error).toHaveBeenCalledWith("--deep is only valid with doctor");
+    error.mockRestore();
+  });
+
   it("emits machine-readable stats and list output", async () => {
     await seedEntry("cli", "cli", "2026-08-12T00:00:00.000Z");
 
@@ -519,6 +764,125 @@ describe("doctor and CLI", () => {
         expect(parsed.entries).toBeArrayOfSize(1);
         expect(parsed.legacyEntries).toEqual([]);
       }
+    }
+  });
+
+  it("reports exact compression and restore storage in stats and list JSON", async () => {
+    if (!discoverZstdCodec()) return;
+    const seeded = await seedCompressedEntry("cli-compression");
+    expect(
+      (
+        await resolveCacheEntryDetailed({
+          projectRoot,
+          platform: "android",
+          fingerprintHash: "cli-compression",
+        })
+      ).outcome
+    ).toBe("hit");
+    const catalog = inventoryCache(projectRoot);
+    const entry = catalog.entries[0]!;
+
+    const outputs: Record<string, unknown> = {};
+    for (const command of ["stats", "list"]) {
+      let output = "";
+      const write = spyOn(process.stdout, "write").mockImplementation(((
+        chunk: string | Uint8Array
+      ) => {
+        output += chunk.toString();
+        return true;
+      }) as typeof process.stdout.write);
+      expect(
+        await runCli([command, "--project-root", projectRoot, "--json"])
+      ).toBe(0);
+      write.mockRestore();
+      outputs[command] = JSON.parse(output) as unknown;
+    }
+
+    expect(outputs.stats).toMatchObject({
+      compression: {
+        compressedEntries: 1,
+        logicalArtifactBytes: entry.logicalArtifactBytes,
+        payloadBytes: entry.payloadBytes,
+        grossSavedBytes: entry.grossCompressionSavedBytes,
+        restoreBytes: entry.restoreBytes,
+        netSavedBytes: entry.grossCompressionSavedBytes - entry.restoreBytes,
+      },
+    });
+    expect(outputs.list).toMatchObject({
+      entries: [
+        {
+          encoding: "zstd",
+          logicalArtifactBytes: entry.logicalArtifactBytes,
+          payloadBytes: entry.payloadBytes,
+          compressionRatio: entry.compressionRatio,
+          grossCompressionSavedBytes: entry.grossCompressionSavedBytes,
+          restoreBytes: entry.restoreBytes,
+        },
+      ],
+    });
+    expect(
+      fs.existsSync(
+        getRestoreDirectory(seeded.paths, "android", seeded.entryId)
+      )
+    ).toBe(true);
+  });
+
+  it("rejects impossible compression savings without crashing inspector commands", async () => {
+    if (!discoverZstdCodec()) return;
+    const seeded = await seedCompressedEntry("hostile-compression-accounting");
+    const entryDirectory = path.dirname(seeded.artifact);
+    const manifest = readManifest(entryDirectory);
+    expect(manifest.schemaVersion).toBe(2);
+    if (manifest.schemaVersion !== 2) return;
+    fs.writeFileSync(
+      path.join(entryDirectory, "manifest.json"),
+      `${JSON.stringify(
+        {
+          ...manifest,
+          payload: { ...manifest.payload, schema1EquivalentBytes: 1 },
+        },
+        null,
+        2
+      )}\n`
+    );
+
+    const catalog = inventoryCache(projectRoot);
+    expect(catalog.entries).toEqual([]);
+    expect(catalog.invalidEntries).toHaveLength(1);
+    expect(catalog.issues).toContainEqual(
+      expect.objectContaining({
+        code: "invalid-entry",
+        message:
+          "Compressed cache metadata cannot claim less storage than the committed entry",
+      })
+    );
+
+    for (const command of ["stats", "list", "doctor"] as const) {
+      let output = "";
+      const write = spyOn(process.stdout, "write").mockImplementation(((
+        chunk: string | Uint8Array
+      ) => {
+        output += chunk.toString();
+        return true;
+      }) as typeof process.stdout.write);
+      const status = await runCli([
+        command,
+        "--project-root",
+        projectRoot,
+        "--json",
+      ]);
+      write.mockRestore();
+
+      expect(status).toBe(1);
+      const parsed = JSON.parse(output) as { issues: unknown[] };
+      expect(parsed.issues).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            code: "invalid-entry",
+            severity: "error",
+          }),
+        ])
+      );
     }
   });
 

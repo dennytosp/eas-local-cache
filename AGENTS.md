@@ -22,6 +22,10 @@ Run the focused checks while iterating and the complete validation suite before
 committing. Native changes must also be exercised through the app under
 `example/` whenever the required simulator or emulator is available.
 
+Design specs under `docs/superpowers/specs/` are local working artifacts. Never
+stage or commit anything from this directory; remove any historically tracked
+spec from Git while preserving its local file when practical.
+
 ## Project Boundaries
 
 - Treat `docs/superpowers/specs/` as local-only design scratch space. Never

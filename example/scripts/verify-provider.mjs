@@ -39,7 +39,7 @@ for (const method of ["calculateFingerprintHash", "resolveBuildCache", "uploadBu
   }
 }
 
-const evaluateConfig = (salt) => {
+const evaluateConfig = (environment = {}) => {
   const output = execFileSync(
     process.execPath,
     ["./node_modules/expo/bin/cli", "config", "--type", "public", "--json"],
@@ -48,15 +48,17 @@ const evaluateConfig = (salt) => {
       encoding: "utf8",
       env: {
         ...process.env,
-        ...(salt ? { EAS_LOCAL_CACHE_TEST_SALT: salt } : {}),
+        ...environment,
       },
     }
   );
   return JSON.parse(output);
 };
 
-const configWithoutSalt = evaluateConfig(null);
-const configWithSalt = evaluateConfig("non-secret-provider-verification");
+const configWithoutSalt = evaluateConfig();
+const configWithSalt = evaluateConfig({
+  EAS_LOCAL_CACHE_TEST_SALT: "non-secret-provider-verification",
+});
 if (configWithoutSalt.extra?.easLocalCacheTestSalt !== undefined) {
   throw new Error("The cache test salt must be omitted unless explicitly set");
 }
@@ -84,6 +86,13 @@ if (
   throw new Error("Dynamic Expo config did not expose the test environment key");
 }
 
+const configWithCompression = evaluateConfig({
+  EAS_LOCAL_CACHE_TEST_COMPRESSION: "zstd",
+});
+if (configWithCompression.buildCacheProvider?.options?.compression !== "zstd") {
+  throw new Error("Dynamic Expo config did not enable the compression oracle");
+}
+
 if (providerPackageJson.bin?.["eas-local-cache"] !== "build/cli-bin.js") {
   throw new Error("The local package does not expose the Cache Inspector CLI");
 }
@@ -94,7 +103,8 @@ if (
   configuredOptions?.maxEntries !== 50 ||
   configuredOptions?.retentionDays !== 14 ||
   configuredOptions?.autoPrune !== true ||
-  configuredOptions?.toolchain !== "safe"
+  configuredOptions?.toolchain !== "safe" ||
+  configuredOptions?.compression !== "off"
 ) {
   throw new Error("The example cleanup policy does not match the documented defaults");
 }

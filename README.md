@@ -17,6 +17,7 @@ instead of compiling it again.
 - **Project-scoped caching** that works from subdirectories and monorepos
 - **Atomic and self-healing entries** that reject partial or corrupted builds
 - **Automatic storage limits** with TTL and least-recently-used cleanup
+- **Opt-in zstd compression** with verified, atomic artifact restoration
 - **Cache Inspector CLI** for capacity, entry, health, and prune operations
 - **Explainable cache misses** based on privacy-safe Expo fingerprint evidence
 - **Local hit-rate telemetry** with conservative estimated time saved
@@ -34,6 +35,8 @@ https://github.com/user-attachments/assets/bc7c09ad-333e-4043-a52c-667c3919668d
 - An Expo project with a version of Expo CLI that supports
   `buildCacheProvider`
 - Xcode for iOS Simulator builds or the Android SDK for Android builds
+- For optional zstd compression: a Node.js runtime with built-in zstd support,
+  or the `zstd` executable available on `PATH`
 
 This package only participates in local native builds. It is not imported by
 your application at runtime.
@@ -73,6 +76,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
       retentionDays: 14,
       autoPrune: true,
       toolchain: "safe",
+      compression: "zstd",
     },
   },
 });
@@ -90,7 +94,8 @@ Or use `app.json`:
         "maxEntries": 50,
         "retentionDays": 14,
         "autoPrune": true,
-        "toolchain": "safe"
+        "toolchain": "safe",
+        "compression": "zstd"
       }
     }
   }
@@ -114,9 +119,11 @@ The first run compiles the native app and stores its artifact. A later run with
 the same project fingerprint restores that artifact and launches it without
 recompiling.
 
-The options shown above are also the zero-config defaults. Sizes use binary
-multipliers, so `20GB` means 20 GiB. Set an individual limit to `null` to
-disable it, or set `autoPrune` to `false` to keep maintenance manual.
+The storage-limit and toolchain options shown above are the zero-config
+defaults. Compression is deliberately opt-in: omit `compression`, or set it to
+`"off"`, to keep artifacts uncompressed. Sizes use binary multipliers, so
+`20GB` means 20 GiB. Set an individual limit to `null` to disable it, or set
+`autoPrune` to `false` to keep maintenance manual.
 
 `toolchain` defaults to `safe`, separating artifacts by build profile and
 deterministic Xcode/Simulator SDK or JDK/Gradle/Android ABI signals. Use
@@ -124,13 +131,21 @@ deterministic Xcode/Simulator SDK or JDK/Gradle/Android ABI signals. Use
 Expo's original fingerprint behavior. An optional `environmentKey` adds a
 team-defined context; only its SHA-256 digest is retained.
 
+With `compression: "zstd"`, the provider uses Node's built-in zstd codec when
+available and otherwise looks for the `zstd` command. A compressed upload is
+published only when it is smaller and round-trips to the original artifact.
+If no codec is available, disk space is insufficient, or the round-trip check
+fails, the successful native build is cached normally without compression.
+
 ## How It Works
 
 1. Expo calculates a fingerprint from the native build inputs.
 2. `eas-local-cache` derives a versioned identity from that fingerprint, the
    build profile, and deterministic local toolchain signals, then validates the
    matching entry in `<projectRoot>/.expo/cache`.
-3. On a cache hit, Expo installs and launches the stored artifact.
+3. On a cache hit, Expo installs and launches the stored artifact. Compressed
+   entries are first materialized into an atomic, integrity-checked restore
+   directory that later hits can reuse.
 4. On a cache miss, Expo builds normally. The successful artifact is copied to
    a staging entry, checksummed, and atomically published for the next run.
 
@@ -151,11 +166,14 @@ Expo perform an uncached build.
 
 After a successful upload, automatic maintenance removes expired data first and
 then least-recently-used entries until the size and entry-count soft caps are
-satisfied. The new artifact, recently returned artifacts, and active builds are
-protected. Maintenance failure never turns a successful native build into an
-error. The size cap covers valid and invalid entries, staging, quarantine, and
-trash. Operational metadata and backward-compatible legacy entries are reported
-by `stats` but are not deleted automatically.
+satisfied. Expired materialized restores are reclaimed as well, and deleting a
+compressed source entry also deletes its corresponding restore. The new
+artifact, recently returned artifacts, and active builds are protected.
+Maintenance failure never turns a successful native build into an error. The
+size cap covers valid and invalid entries, upload and restore staging,
+materialized restores, quarantine, and trash. Operational metadata and
+backward-compatible legacy entries are reported by `stats` but are not deleted
+automatically.
 
 ## Cache Inspector CLI
 
@@ -170,13 +188,16 @@ npx eas-local-cache prune --max-size 10GB --max-entries 20 --retention-days 7
 ```
 
 Every command accepts `--project-root <path>` and `--json` for automation.
-`doctor` performs the same full identity and integrity checks used by cache
-resolution without changing the cache. `prune --dry-run` uses the same planner
-as real and automatic cleanup. Stats report exact bytes and counts plus hit rate
-for retained local decisions. Estimated time saved uses a conservative
-native-artifact timestamp sample; a hit without reliable timing remains
-explicitly unknown. Telemetry is retained for 90 days and at most 10,000
-events, independent of `autoPrune`.
+`list` identifies each entry's `none` or `zstd` encoding; JSON output also
+includes logical, payload, gross-savings, and materialized-restore byte counts.
+`stats --json` aggregates compressed entry count, gross saved bytes, restore
+bytes, and net saved bytes. `doctor` performs the same identity and integrity
+checks used by cache resolution without changing the cache. `prune --dry-run`
+uses the same planner as real and automatic cleanup, including restore data.
+Stats also report exact bytes and counts plus hit rate for retained local
+decisions. Estimated time saved uses a conservative native-artifact timestamp
+sample; a hit without reliable timing remains explicitly unknown. Telemetry is
+retained for 90 days and at most 10,000 events, independent of `autoPrune`.
 
 The cache is resolved from the project root supplied by Expo, not the current
 working directory. This keeps caches isolated when commands are run from a
@@ -190,6 +211,7 @@ Versioned artifacts are stored under `.expo/cache/eas-local-cache/v1`:
 | ------------- | --------------------------------------------- |
 | `entries/`    | Immutable platform artifacts and manifests    |
 | `staging/`    | Incomplete uploads, never used for cache hits |
+| `restores/`   | Atomic materializations of compressed entries |
 | `locks/`      | Per-entry writer coordination                 |
 | `quarantine/` | Invalid entries retained for diagnosis        |
 | `access/`     | Atomic last-used records and short leases     |
@@ -197,10 +219,12 @@ Versioned artifacts are stored under `.expo/cache/eas-local-cache/v1`:
 | `state/`      | Last valid cleanup policy                     |
 | `trash/`      | Atomic removal tombstones                     |
 
-Each entry contains `artifact.app` or `artifact.apk` plus `manifest.json` and,
-for new builds, optional privacy-safe `insight.json`. The directory name is a
-SHA-256 cache identity, so fingerprint values never become raw filesystem
-paths. Flat `ios_<fingerprint>.app` and
+An uncompressed entry contains `artifact.app` or `artifact.apk`. A compressed
+entry instead contains `artifact.app.zst` or `artifact.apk.zst` and a versioned
+manifest describing the logical artifact and payload checksums. Both formats
+may include privacy-safe `insight.json`. The directory name is a SHA-256 cache
+identity, so fingerprint values never become raw filesystem paths. Flat
+`ios_<fingerprint>.app` and
 `android_<fingerprint>.apk` entries created by earlier releases remain readable
 for backward compatibility but are reported as unverified legacy entries.
 
@@ -242,6 +266,18 @@ quarantined automatically and Expo continues with a normal rebuild. If the
 problem repeats, clear `.expo/cache` and check that the project directory is
 writable and has enough available disk space.
 
+### Compression falls back to a normal entry
+
+Compression never blocks a usable native build. Install the `zstd` command or
+run Expo with a Node.js release that exposes the built-in zstd codec, then
+confirm it is visible in the same shell that starts Expo. The provider also
+falls back when the compressed payload would not save space or there is not
+enough temporary disk capacity for a verified round trip.
+
+If a compressed entry cannot be decoded on a later machine state, it is treated
+as a cache miss. Expo rebuilds normally and replaces it with a readable entry.
+A damaged payload is quarantined instead of being returned to Expo.
+
 ## Example App
 
 The [`example`](./example) Expo app uses HeroUI Native and Uniwind and links the
@@ -257,6 +293,8 @@ bun run --cwd example ios
 bun run --cwd example cache:test:ios
 # build-only iOS oracle (no Simulator launch required)
 EAS_LOCAL_CACHE_TEST_DEVICE=generic bun run --cwd example cache:test:ios
+# opt-in zstd miss → restore hit → verified rematerialized hit
+EAS_LOCAL_CACHE_TEST_DEVICE=generic bun run --cwd example cache:test:compression:ios
 ```
 
 Use an iOS Simulator, or replace `ios` with `android` after starting an

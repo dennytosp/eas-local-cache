@@ -31,6 +31,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Xcode/Simulator SDKs, JDK/Gradle versions, and Android target ABIs.
 - Safe, strict, and compatibility-off toolchain modes plus a privacy-preserving
   optional manual environment key.
+- Opt-in zstd compression for Android APKs and deterministic iOS app-tree
+  archives, with bounded codec operations and verified round trips before
+  publication.
+- Atomic, reusable restore directories for compressed entries, including
+  integrity validation, corruption quarantine, and uncompressed fallback when
+  a decoder or sufficient temporary disk space is unavailable.
+- Compression accounting in Cache Inspector list and stats output, plus restore
+  awareness in automatic and manual cleanup.
 
 ### Changed
 

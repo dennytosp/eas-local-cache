@@ -1,8 +1,10 @@
 import * as crypto from "crypto";
 
 export const TOOLCHAIN_MODES = ["safe", "strict", "off"] as const;
+export const COMPRESSION_MODES = ["off", "zstd"] as const;
 
 export type ToolchainMode = (typeof TOOLCHAIN_MODES)[number];
+export type CompressionMode = (typeof COMPRESSION_MODES)[number];
 
 export type CacheProviderOptions = {
   maxSize?: string | number | null;
@@ -11,6 +13,7 @@ export type CacheProviderOptions = {
   autoPrune?: boolean;
   toolchain?: ToolchainMode;
   environmentKey?: string;
+  compression?: CompressionMode;
 };
 
 export type NormalizedCachePolicy = {
@@ -23,6 +26,10 @@ export type NormalizedCachePolicy = {
 export type NormalizedEnvironmentOptions = {
   toolchainMode: ToolchainMode;
   environmentKeyDigest: string | null;
+};
+
+export type NormalizedCompressionOptions = {
+  compressionMode: CompressionMode;
 };
 
 const GIBIBYTE = 1024 ** 3;
@@ -41,6 +48,9 @@ export const DEFAULT_ENVIRONMENT_OPTIONS: Readonly<NormalizedEnvironmentOptions>
     toolchainMode: "safe",
     environmentKeyDigest: null,
   });
+
+export const DEFAULT_COMPRESSION_OPTIONS: Readonly<NormalizedCompressionOptions> =
+  Object.freeze({ compressionMode: "off" });
 
 const MAX_ENVIRONMENT_KEY_CHARACTERS = 512;
 
@@ -120,6 +130,22 @@ export const normalizeEnvironmentOptions = (
   };
 };
 
+export const normalizeCompressionOptions = (
+  options: CacheProviderOptions = {}
+): NormalizedCompressionOptions => {
+  assertProviderOptions(options);
+  if (
+    options.compression !== undefined &&
+    !COMPRESSION_MODES.includes(options.compression as CompressionMode)
+  ) {
+    throw new Error('compression must be "off" or "zstd"');
+  }
+  return {
+    compressionMode:
+      options.compression ?? DEFAULT_COMPRESSION_OPTIONS.compressionMode,
+  };
+};
+
 export const parseSizeBytes = (value: string | number): number => {
   if (typeof value === "number") {
     return assertSafeNonNegativeInteger(value, "maxSize");
@@ -190,6 +216,7 @@ export const normalizeCacheOptions = (
 ): NormalizedCachePolicy => {
   assertProviderOptions(options);
   normalizeEnvironmentOptions(options);
+  normalizeCompressionOptions(options);
   if (
     options.autoPrune !== undefined &&
     typeof options.autoPrune !== "boolean"

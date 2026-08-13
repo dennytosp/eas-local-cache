@@ -9,7 +9,8 @@ The provider runs in Expo CLI during native builds. It is not imported by the Re
 runtime, so the terminal output—not the rendered screen—is the source of truth for cache
 behavior.
 
-The example also configures the default 20 GiB, 50-entry, 14-day cleanup policy.
+The example also configures the default 20 GiB, 50-entry, 14-day cleanup policy
+and keeps compression off unless a compression test explicitly opts in.
 
 ## Setup
 
@@ -37,6 +38,8 @@ The verification checks the integration points:
 - The package exposes the `eas-local-cache` inspector binary.
 - A conditional `EAS_LOCAL_CACHE_TEST_SALT` changes evaluated Expo config
   without editing tracked or native files.
+- A conditional `EAS_LOCAL_CACHE_TEST_COMPRESSION=zstd` enables the compression
+  oracle while normal example builds retain the package default.
 
 ## Test a real cache round trip
 
@@ -96,8 +99,13 @@ bun run cache:doctor
 bun run cache:prune
 ```
 
-`cache:prune` is a dry run in this fixture, so it prints the real cleanup plan
-without removing the artifacts used by the next hit test.
+`cache:list` shows each entry's `none` or `zstd` encoding. Use
+`bun run cache:stats -- --json` to inspect aggregate gross compression savings,
+materialized restore bytes, and net savings. `cache:doctor` validates cache
+identity and entry integrity without modifying the cache. `cache:prune` is a
+dry run in this fixture, so it includes reclaimable entries and expired restore
+data in a real cleanup plan without removing artifacts used by the next hit
+test.
 
 Individual commands are also available:
 
@@ -146,3 +154,34 @@ EAS_LOCAL_CACHE_TEST_DEVICE=generic bun run cache:test:environment:ios
 With an Android emulator, `bun run cache:test:environment:android` compares a
 targeted debug artifact with an all-architecture debug artifact. Both scripts
 assert two hits, two misses, diagnostic privacy, and a healthy cache.
+
+## Test compressed storage and restore
+
+Compression is opt-in and requires either Node's built-in zstd codec or a
+working `zstd` executable on `PATH`. Check the external decoder with `zstd -V`
+when the Node.js runtime used by Expo does not expose zstd itself.
+
+The compression oracle creates a unique Expo fingerprint, enables
+`compression: "zstd"`, and runs one native miss followed by two identical
+hits. Between the hits it removes only that run's materialized restore, so the
+third build must recreate the restore from the compressed source entry:
+
+```bash
+# Build-only iOS run; use a Simulator UDID to install and launch instead.
+EAS_LOCAL_CACHE_TEST_DEVICE=generic bun run cache:test:compression:ios
+
+# Or start an Android emulator first.
+bun run cache:test:compression:android
+```
+
+It requires the upload log to end in `.zst`, requires both hits to come from the
+atomic `restores/` area, and checks that the second hit rematerialized the exact
+owned restore. It also checks telemetry plus `list`, `stats`, and `doctor`
+output, and verifies that the per-run config token was not persisted in
+diagnostic metadata.
+
+If a codec is unavailable during an ordinary build, compression fails open:
+the provider logs the reason and stores the successful artifact uncompressed.
+If a previously compressed entry cannot be decoded, the lookup becomes a miss
+so Expo can rebuild and replace it. Corrupt compressed payloads are quarantined
+rather than returned to Expo.
