@@ -34,6 +34,8 @@ Status: implemented on `feat/explain-cache-miss`.
 
 ## Milestone 4: Environment-Safe Cache
 
+Status: implemented on `feat/environment-safe-cache`.
+
 - Derive a storage key from Expo's fingerprint plus relevant run options
 - Add carefully selected Xcode, SDK, JDK, Gradle, and architecture compatibility
   signals

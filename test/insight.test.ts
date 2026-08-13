@@ -9,7 +9,9 @@ import {
   MAX_INSIGHT_BYTES,
   MAX_INSIGHT_SOURCES,
   createCacheInsight,
+  diffInsightEnvironment,
   diffInsights,
+  getInsightIdentity,
   getTopEvidenceGroups,
   readInsight,
   sanitizeFingerprintSources,
@@ -19,6 +21,7 @@ import {
   type FingerprintSnapshot,
   type InsightCandidate,
   type InsightSource,
+  type CacheInsightV1,
 } from "../src/cache/insight";
 
 const roots: string[] = [];
@@ -223,6 +226,186 @@ describe("insight persistence", () => {
     );
     expect(() => insight(manySources)).toThrow("1 MiB");
   });
+
+  it("reads schema 1 and normalizes its single identity without rewriting it", () => {
+    const root = makeRoot();
+    const legacy: CacheInsightV1 = {
+      schemaVersion: 1,
+      platform: "ios",
+      entryId: "a".repeat(64),
+      fingerprintHash: "legacy-expo-hash",
+      capturedAt: "2026-08-13T01:02:03.000Z",
+      fingerprintEngineVersion: "0.20.7",
+      runProfile: { configuration: "Debug", scheme: "default" },
+      sources: [],
+    };
+    fs.writeFileSync(
+      path.join(root, INSIGHT_FILENAME),
+      `${JSON.stringify(legacy)}\n`
+    );
+
+    const restored = readInsight(root);
+    expect(restored).toEqual(legacy);
+    expect(getInsightIdentity(restored!)).toEqual({
+      fingerprintHash: "legacy-expo-hash",
+      baseFingerprintHash: "legacy-expo-hash",
+      effectiveFingerprintHash: "legacy-expo-hash",
+      keySchema: "expo-base",
+      toolchainMode: "off",
+      toolchain: null,
+      environmentKeyDigest: null,
+    });
+  });
+
+  it("strictly validates schema 2 aliases and sanitized fixed toolchain fields", () => {
+    const root = makeRoot();
+    const record = createCacheInsight(
+      snapshot([], {
+        fingerprintHash: `elc-env-v1:${"a".repeat(64)}`,
+        baseFingerprintHash: "expo-base-hash",
+        effectiveFingerprintHash: `elc-env-v1:${"a".repeat(64)}`,
+        keySchema: "environment-v1",
+        toolchainMode: "safe",
+        toolchain: {
+          platform: "ios",
+          hostArch: "arm64",
+          xcodeBuildVersion: "17A1",
+          simulatorSdkBuildVersion: "23A1",
+        },
+        environmentKeyDigest: "b".repeat(64),
+      }),
+      "c".repeat(64)
+    );
+    writeInsightAtomically(root, record);
+    expect(readInsight(root)).toEqual(record);
+    expect(JSON.stringify(record)).not.toContain(
+      "optional-team-defined-context"
+    );
+    expect(record.schemaVersion).toBe(2);
+    if (record.schemaVersion !== 2)
+      throw new Error("Expected schema 2 insight");
+
+    for (const malformed of [
+      { ...record, effectiveFingerprintHash: "different" },
+      {
+        ...record,
+        fingerprintHash: `elc-env-v1:${"A".repeat(64)}`,
+        effectiveFingerprintHash: `elc-env-v1:${"A".repeat(64)}`,
+      },
+      { ...record, toolchain: { ...record.toolchain, unexpected: "raw" } },
+      {
+        ...record,
+        toolchain: { ...record.toolchain, hostArch: "riscv64" },
+      },
+      {
+        ...record,
+        toolchain: { ...record.toolchain, hostArch: "other" },
+      },
+      { ...record, toolchainMode: "strict" },
+      {
+        ...record,
+        toolchain: { ...record.toolchain, xcodeVersion: "16.4" },
+      },
+      { ...record, environmentKeyDigest: "not-a-digest" },
+    ]) {
+      const malformedRoot = makeRoot();
+      fs.writeFileSync(
+        path.join(malformedRoot, INSIGHT_FILENAME),
+        JSON.stringify(malformed)
+      );
+      expect(() => readInsight(malformedRoot)).toThrow("malformed");
+    }
+
+    const offRoot = makeRoot();
+    const offRecord = {
+      ...record,
+      toolchainMode: "off" as const,
+      toolchain: null,
+    };
+    fs.writeFileSync(
+      path.join(offRoot, INSIGHT_FILENAME),
+      JSON.stringify(offRecord)
+    );
+    expect(readInsight(offRoot)).toEqual(offRecord);
+
+    const offWithoutManualContextRoot = makeRoot();
+    fs.writeFileSync(
+      path.join(offWithoutManualContextRoot, INSIGHT_FILENAME),
+      JSON.stringify({ ...offRecord, environmentKeyDigest: null })
+    );
+    expect(() => readInsight(offWithoutManualContextRoot)).toThrow("malformed");
+  });
+
+  it("requires exact Android enums and safe or strict field sets", () => {
+    const effectiveHash = `elc-env-v1:${"d".repeat(64)}`;
+    const safe = createCacheInsight(
+      snapshot([], {
+        platform: "android",
+        runProfile: { variant: "debug", allArch: false },
+        fingerprintHash: effectiveHash,
+        baseFingerprintHash: "opaque:expo/base/hash",
+        effectiveFingerprintHash: effectiveHash,
+        keySchema: "environment-v1",
+        toolchainMode: "safe",
+        toolchain: {
+          platform: "android",
+          hostArch: "arm64",
+          javaSpecificationVersion: "21",
+          javaVendorFamily: "adoptium",
+          jvmArch: "arm64",
+          gradleVersion: "8.14.3",
+          targetArchitecture: "arm64-v8a",
+        },
+        environmentKeyDigest: null,
+      }),
+      "e".repeat(64)
+    );
+    const strict = {
+      ...safe,
+      toolchainMode: "strict" as const,
+      toolchain: {
+        ...safe.toolchain,
+        javaRuntimeVersion: "21.0.7+6-LTS",
+        vmFamily: "hotspot",
+        gradleDistributionBasename: "gradle-8.14.3-bin.zip",
+      },
+    };
+
+    for (const valid of [safe, strict]) {
+      const root = makeRoot();
+      fs.writeFileSync(
+        path.join(root, INSIGHT_FILENAME),
+        JSON.stringify(valid)
+      );
+      expect(JSON.stringify(readInsight(root))).toBe(JSON.stringify(valid));
+    }
+
+    for (const malformed of [
+      { ...safe, toolchainMode: "strict" },
+      {
+        ...safe,
+        toolchain: { ...safe.toolchain, javaRuntimeVersion: "21.0.7" },
+      },
+      {
+        ...safe,
+        toolchain: { ...safe.toolchain, javaVendorFamily: "private-vendor" },
+      },
+      { ...safe, toolchain: { ...safe.toolchain, jvmArch: "riscv64" } },
+      { ...safe, toolchain: { ...safe.toolchain, jvmArch: "other" } },
+      {
+        ...safe,
+        toolchain: { ...safe.toolchain, targetArchitecture: "mips" },
+      },
+      { ...strict, toolchain: { ...strict.toolchain, vmFamily: "custom-vm" } },
+    ]) {
+      const root = makeRoot();
+      fs.writeFileSync(
+        path.join(root, INSIGHT_FILENAME),
+        JSON.stringify(malformed)
+      );
+      expect(() => readInsight(root)).toThrow("malformed");
+    }
+  });
 });
 
 describe("insight diffing and candidate ranking", () => {
@@ -299,19 +482,23 @@ describe("insight diffing and candidate ranking", () => {
     }
   });
 
-  it("does not guess across profile or fingerprint-engine changes", () => {
+  it("keeps profile differences as explainable evidence but not engine changes", () => {
     const current = snapshot([]);
-    expect(
-      selectClosestInsight(current, [
-        {
-          insight: insight([], "a".repeat(64), {
-            runProfile: { configuration: "Release", scheme: "default" },
-          }),
-          entryId: "a".repeat(64),
-          createdAt: "2026-08-13T00:00:00.000Z",
-        },
-      ]).status
-    ).toBe("no-compatible-profile");
+    const profileResult = selectClosestInsight(current, [
+      {
+        insight: insight([], "a".repeat(64), {
+          runProfile: { configuration: "Release", scheme: "default" },
+        }),
+        entryId: "a".repeat(64),
+        createdAt: "2026-08-13T00:00:00.000Z",
+      },
+    ]);
+    expect(profileResult.status).toBe("match");
+    if (profileResult.status === "match") {
+      expect(profileResult.environmentDiff.groups).toEqual([
+        { category: "build-profile", count: 1 },
+      ]);
+    }
     expect(
       selectClosestInsight(current, [
         {
@@ -323,5 +510,37 @@ describe("insight diffing and candidate ranking", () => {
         },
       ]).status
     ).toBe("fingerprint-engine-mismatch");
+  });
+
+  it("reports only a schema upgrade for legacy environment evidence", () => {
+    const before: CacheInsightV1 = {
+      schemaVersion: 1,
+      platform: "ios",
+      entryId: "a".repeat(64),
+      fingerprintHash: "expo-hash",
+      capturedAt: "2026-08-13T01:02:03.000Z",
+      fingerprintEngineVersion: "0.20.7",
+      runProfile: { configuration: "Debug", scheme: "default" },
+      sources: [],
+    };
+    const after = snapshot([], {
+      fingerprintHash: `elc-env-v1:${"b".repeat(64)}`,
+      baseFingerprintHash: "expo-hash",
+      effectiveFingerprintHash: `elc-env-v1:${"b".repeat(64)}`,
+      keySchema: "environment-v1",
+      toolchainMode: "safe",
+      toolchain: {
+        platform: "ios",
+        hostArch: "arm64",
+        xcodeBuildVersion: "17A1",
+        simulatorSdkBuildVersion: "23A1",
+      },
+      environmentKeyDigest: null,
+    });
+    expect(diffInsightEnvironment(before, after)).toEqual({
+      items: [{ field: "keySchema", category: "key-schema" }],
+      total: 1,
+      groups: [{ category: "key-schema", count: 1 }],
+    });
   });
 });

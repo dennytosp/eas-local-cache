@@ -64,6 +64,26 @@ if (configWithSalt.extra?.easLocalCacheTestSalt !== "non-secret-provider-verific
   throw new Error("Dynamic Expo config did not expose the cache test salt");
 }
 
+const outputWithEnvironmentKey = execFileSync(
+  process.execPath,
+  ["./node_modules/expo/bin/cli", "config", "--type", "public", "--json"],
+  {
+    cwd: new URL("..", import.meta.url),
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      EAS_LOCAL_CACHE_TEST_ENVIRONMENT_KEY: "non-secret-environment-key",
+    },
+  }
+);
+const configWithEnvironmentKey = JSON.parse(outputWithEnvironmentKey);
+if (
+  configWithEnvironmentKey.buildCacheProvider?.options?.environmentKey !==
+  "non-secret-environment-key"
+) {
+  throw new Error("Dynamic Expo config did not expose the test environment key");
+}
+
 if (providerPackageJson.bin?.["eas-local-cache"] !== "build/cli-bin.js") {
   throw new Error("The local package does not expose the Cache Inspector CLI");
 }
@@ -73,7 +93,8 @@ if (
   configuredOptions?.maxSize !== "20GB" ||
   configuredOptions?.maxEntries !== 50 ||
   configuredOptions?.retentionDays !== 14 ||
-  configuredOptions?.autoPrune !== true
+  configuredOptions?.autoPrune !== true ||
+  configuredOptions?.toolchain !== "safe"
 ) {
   throw new Error("The example cleanup policy does not match the documented defaults");
 }

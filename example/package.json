@@ -10,6 +10,8 @@
     "verify:provider": "node ./scripts/verify-provider.mjs",
     "cache:test:ios": "bash ./scripts/test-cache-native.sh ios",
     "cache:test:android": "bash ./scripts/test-cache-native.sh android",
+    "cache:test:environment:ios": "bash ./scripts/test-cache-environment.sh ios",
+    "cache:test:environment:android": "bash ./scripts/test-cache-environment.sh android",
     "cache:stats": "node ../build/cli-bin.js stats --project-root .",
     "cache:list": "node ../build/cli-bin.js list --project-root .",
     "cache:doctor": "node ../build/cli-bin.js doctor --project-root .",

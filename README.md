@@ -72,6 +72,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
       maxEntries: 50,
       retentionDays: 14,
       autoPrune: true,
+      toolchain: "safe",
     },
   },
 });
@@ -88,7 +89,8 @@ Or use `app.json`:
         "maxSize": "20GB",
         "maxEntries": 50,
         "retentionDays": 14,
-        "autoPrune": true
+        "autoPrune": true,
+        "toolchain": "safe"
       }
     }
   }
@@ -116,11 +118,18 @@ The options shown above are also the zero-config defaults. Sizes use binary
 multipliers, so `20GB` means 20 GiB. Set an individual limit to `null` to
 disable it, or set `autoPrune` to `false` to keep maintenance manual.
 
+`toolchain` defaults to `safe`, separating artifacts by build profile and
+deterministic Xcode/Simulator SDK or JDK/Gradle/Android ABI signals. Use
+`strict` for additional exact versions, or `off` only when you explicitly want
+Expo's original fingerprint behavior. An optional `environmentKey` adds a
+team-defined context; only its SHA-256 digest is retained.
+
 ## How It Works
 
 1. Expo calculates a fingerprint from the native build inputs.
-2. `eas-local-cache` derives a safe cache identity from the platform and
-   fingerprint, then validates the matching entry in `<projectRoot>/.expo/cache`.
+2. `eas-local-cache` derives a versioned identity from that fingerprint, the
+   build profile, and deterministic local toolchain signals, then validates the
+   matching entry in `<projectRoot>/.expo/cache`.
 3. On a cache hit, Expo installs and launches the stored artifact.
 4. On a cache miss, Expo builds normally. The successful artifact is copied to
    a staging entry, checksummed, and atomically published for the next run.
@@ -134,6 +143,11 @@ entries. On an ordinary miss it compares those descriptors and reports up to
 three evidence groups, such as Expo config or native dependency changes. Raw
 Expo config, source contents, absolute paths, device IDs, and arbitrary reason
 strings are never written to diagnostic metadata.
+
+Environment-aware keys never fall back to older entries that lack toolchain
+context, so the first safe-mode build is an intentional cold miss. Discovery is
+bounded, read-only, and fail-open: an unavailable required signal simply makes
+Expo perform an uncached build.
 
 After a successful upload, automatic maintenance removes expired data first and
 then least-recently-used entries until the size and entry-count soft caps are

@@ -1,8 +1,16 @@
+import * as crypto from "crypto";
+
+export const TOOLCHAIN_MODES = ["safe", "strict", "off"] as const;
+
+export type ToolchainMode = (typeof TOOLCHAIN_MODES)[number];
+
 export type CacheProviderOptions = {
   maxSize?: string | number | null;
   maxEntries?: number | null;
   retentionDays?: number | null;
   autoPrune?: boolean;
+  toolchain?: ToolchainMode;
+  environmentKey?: string;
 };
 
 export type NormalizedCachePolicy = {
@@ -10,6 +18,11 @@ export type NormalizedCachePolicy = {
   maxEntries: number | null;
   retentionMs: number | null;
   autoPrune: boolean;
+};
+
+export type NormalizedEnvironmentOptions = {
+  toolchainMode: ToolchainMode;
+  environmentKeyDigest: string | null;
 };
 
 const GIBIBYTE = 1024 ** 3;
@@ -22,6 +35,14 @@ export const DEFAULT_CACHE_POLICY: Readonly<NormalizedCachePolicy> =
     retentionMs: 14 * DAY_MS,
     autoPrune: true,
   });
+
+export const DEFAULT_ENVIRONMENT_OPTIONS: Readonly<NormalizedEnvironmentOptions> =
+  Object.freeze({
+    toolchainMode: "safe",
+    environmentKeyDigest: null,
+  });
+
+const MAX_ENVIRONMENT_KEY_CHARACTERS = 512;
 
 const SIZE_MULTIPLIERS = {
   B: 1,
@@ -37,6 +58,66 @@ const assertSafeNonNegativeInteger = (value: number, name: string): number => {
   }
 
   return value;
+};
+
+const assertProviderOptions = (
+  options: CacheProviderOptions
+): CacheProviderOptions => {
+  if (
+    typeof options !== "object" ||
+    options === null ||
+    Array.isArray(options)
+  ) {
+    throw new Error("Cache provider options must be an object");
+  }
+  return options;
+};
+
+const hasControlCharacters = (value: string): boolean =>
+  Array.from(value).some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f);
+  });
+
+export const normalizeEnvironmentOptions = (
+  options: CacheProviderOptions = {}
+): NormalizedEnvironmentOptions => {
+  assertProviderOptions(options);
+
+  if (
+    options.toolchain !== undefined &&
+    !TOOLCHAIN_MODES.includes(options.toolchain as ToolchainMode)
+  ) {
+    throw new Error('toolchain must be "safe", "strict", or "off"');
+  }
+  if (
+    options.environmentKey !== undefined &&
+    typeof options.environmentKey !== "string"
+  ) {
+    throw new Error("environmentKey must be a string");
+  }
+  if (
+    options.environmentKey !== undefined &&
+    (Array.from(options.environmentKey).length >
+      MAX_ENVIRONMENT_KEY_CHARACTERS ||
+      hasControlCharacters(options.environmentKey))
+  ) {
+    throw new Error(
+      "environmentKey must be at most 512 characters and contain no control characters"
+    );
+  }
+
+  return {
+    toolchainMode:
+      options.toolchain ?? DEFAULT_ENVIRONMENT_OPTIONS.toolchainMode,
+    environmentKeyDigest:
+      options.environmentKey === undefined
+        ? null
+        : crypto
+            .createHash("sha256")
+            .update(options.environmentKey, "utf8")
+            .digest("hex"),
+  };
 };
 
 export const parseSizeBytes = (value: string | number): number => {
@@ -107,13 +188,8 @@ const normalizeRetention = (value: number | null | undefined) => {
 export const normalizeCacheOptions = (
   options: CacheProviderOptions = {}
 ): NormalizedCachePolicy => {
-  if (
-    typeof options !== "object" ||
-    options === null ||
-    Array.isArray(options)
-  ) {
-    throw new Error("Cache provider options must be an object");
-  }
+  assertProviderOptions(options);
+  normalizeEnvironmentOptions(options);
   if (
     options.autoPrune !== undefined &&
     typeof options.autoPrune !== "boolean"
