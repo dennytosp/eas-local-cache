@@ -18,4 +18,4 @@ coverage
 !bun.lock
 
 # Local agent design artifacts. Product documentation belongs under docs/.
-docs/superpowers/specs/*.md
+docs/superpowers/specs/
