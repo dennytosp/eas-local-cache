@@ -17,6 +17,7 @@ It integrates with `npx expo run:ios` and `npx expo run:android`; it is not an
 - Build package: `bun run build`
 - Verify example config: `bun run example:check`
 - Inspect cache: `bun run build && node build/cli-bin.js stats`
+- Check module boundaries: `bun run architecture:check`
 
 Run the focused checks while iterating and the complete validation suite before
 committing. Native changes must also be exercised through the app under
@@ -51,4 +52,5 @@ Uniwind and references the repository package directly. Do not commit generated
 ## Detailed Rules
 
 - `.agents/rules/cache-correctness.md`
+- `.agents/rules/code-structure.md`
 - `.agents/rules/example-app.md`
