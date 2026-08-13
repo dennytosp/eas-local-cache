@@ -14,6 +14,7 @@ import {
   ensureManagedDirectory,
   pathExists,
 } from "./filesystem";
+import { pruneResolveEvents, type ResolveEventPruneCandidate } from "./events";
 import { acquireEntryLock, inspectEntryLock, releaseEntryLock } from "./lock";
 import type { NormalizedCachePolicy } from "./options";
 
@@ -33,6 +34,9 @@ export type PruneResult = {
   removed: PruneCandidate[];
   auxiliaryCandidates: AuxiliaryPruneCandidate[];
   auxiliaryRemoved: AuxiliaryPruneCandidate[];
+  telemetryCandidates: ResolveEventPruneCandidate[];
+  telemetryRemoved: ResolveEventPruneCandidate[];
+  telemetryReclaimedBytes: number;
   skipped: Array<{ entryId: string; reason: string }>;
   reclaimedBytes: number;
   remainingEntries: number;
@@ -332,6 +336,23 @@ export const pruneCache = async (
   const catalog = inventoryCache(projectRoot);
   const now = options.now ?? new Date();
   const nowMs = now.getTime();
+  const telemetryPrune = await pruneResolveEvents(
+    catalog.paths.providerRoot,
+    catalog.paths.eventsRoot,
+    { dryRun: options.dryRun, nowMs }
+  );
+  const telemetryCandidates =
+    telemetryPrune.status === "pruned" ? telemetryPrune.candidates : [];
+  const telemetryRemoved =
+    telemetryPrune.status === "pruned" ? telemetryPrune.removed : [];
+  const telemetryReclaimedBytes =
+    telemetryPrune.status === "pruned" ? telemetryPrune.removedBytes : 0;
+  const telemetryIssues =
+    telemetryPrune.status === "failed"
+      ? [`Could not prune telemetry: ${telemetryPrune.error.message}`]
+      : telemetryPrune.status === "lock-busy"
+      ? ["Could not acquire the telemetry maintenance lock"]
+      : [];
   const protectedEntryIds = new Set(options.protectedEntryIds ?? []);
   const auxiliaryCandidates = addAuxiliaryForSize(
     catalog,
@@ -378,6 +399,9 @@ export const pruneCache = async (
       removed: [],
       auxiliaryCandidates,
       auxiliaryRemoved: [],
+      telemetryCandidates,
+      telemetryRemoved,
+      telemetryReclaimedBytes,
       skipped: [],
       reclaimedBytes,
       remainingEntries: initialCount - candidates.length,
@@ -387,7 +411,10 @@ export const pruneCache = async (
         remainingBytes,
         policy
       ),
-      issues: catalog.issues.map((issue) => `${issue.code}: ${issue.message}`),
+      issues: [
+        ...catalog.issues.map((issue) => `${issue.code}: ${issue.message}`),
+        ...telemetryIssues,
+      ],
     };
   }
 
@@ -404,6 +431,9 @@ export const pruneCache = async (
       removed: [],
       auxiliaryCandidates,
       auxiliaryRemoved: [],
+      telemetryCandidates,
+      telemetryRemoved,
+      telemetryReclaimedBytes,
       skipped: candidates.map((entry) => ({
         entryId: entry.entryId,
         reason: "maintenance is already running",
@@ -416,7 +446,7 @@ export const pruneCache = async (
         initialBytes + auxiliaryBytes,
         policy
       ),
-      issues: ["Could not acquire the maintenance lock"],
+      issues: ["Could not acquire the maintenance lock", ...telemetryIssues],
     };
   }
 
@@ -426,6 +456,7 @@ export const pruneCache = async (
   const issues = catalog.issues.map(
     (issue) => `${issue.code}: ${issue.message}`
   );
+  issues.push(...telemetryIssues);
   try {
     ensureManagedDirectory(catalog.paths.providerRoot, catalog.paths.trashRoot);
     for (const candidate of auxiliaryCandidates) {
@@ -624,6 +655,9 @@ export const pruneCache = async (
     removed,
     auxiliaryCandidates,
     auxiliaryRemoved,
+    telemetryCandidates,
+    telemetryRemoved,
+    telemetryReclaimedBytes,
     skipped,
     reclaimedBytes,
     remainingEntries,

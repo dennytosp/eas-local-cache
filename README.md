@@ -18,6 +18,8 @@ instead of compiling it again.
 - **Atomic and self-healing entries** that reject partial or corrupted builds
 - **Automatic storage limits** with TTL and least-recently-used cleanup
 - **Cache Inspector CLI** for capacity, entry, health, and prune operations
+- **Explainable cache misses** based on privacy-safe Expo fingerprint evidence
+- **Local hit-rate telemetry** with conservative estimated time saved
 - **Typed TypeScript implementation** with no runtime changes to your app
 
 ---
@@ -127,6 +129,12 @@ Concurrent builds for the same fingerprint coordinate through a per-entry lock.
 Incomplete staging data is never used, and a versioned entry that fails its
 manifest or integrity checks is moved to quarantine and treated as a cache miss.
 
+The provider retains only bounded, sanitized fingerprint descriptors beside new
+entries. On an ordinary miss it compares those descriptors and reports up to
+three evidence groups, such as Expo config or native dependency changes. Raw
+Expo config, source contents, absolute paths, device IDs, and arbitrary reason
+strings are never written to diagnostic metadata.
+
 After a successful upload, automatic maintenance removes expired data first and
 then least-recently-used entries until the size and entry-count soft caps are
 satisfied. The new artifact, recently returned artifacts, and active builds are
@@ -149,10 +157,12 @@ npx eas-local-cache prune --max-size 10GB --max-entries 20 --retention-days 7
 
 Every command accepts `--project-root <path>` and `--json` for automation.
 `doctor` performs the same full identity and integrity checks used by cache
-resolution without changing the cache. `prune
---dry-run` uses the same planner as real and automatic cleanup. Stats report
-exact bytes and counts; hit rate and estimated time saved remain unavailable
-until resolve/build event telemetry is added.
+resolution without changing the cache. `prune --dry-run` uses the same planner
+as real and automatic cleanup. Stats report exact bytes and counts plus hit rate
+for retained local decisions. Estimated time saved uses a conservative
+native-artifact timestamp sample; a hit without reliable timing remains
+explicitly unknown. Telemetry is retained for 90 days and at most 10,000
+events, independent of `autoPrune`.
 
 The cache is resolved from the project root supplied by Expo, not the current
 working directory. This keeps caches isolated when commands are run from a
@@ -169,12 +179,14 @@ Versioned artifacts are stored under `.expo/cache/eas-local-cache/v1`:
 | `locks/`      | Per-entry writer coordination                 |
 | `quarantine/` | Invalid entries retained for diagnosis        |
 | `access/`     | Atomic last-used records and short leases     |
+| `events/`     | Bounded, private resolve telemetry            |
 | `state/`      | Last valid cleanup policy                     |
 | `trash/`      | Atomic removal tombstones                     |
 
-Each entry contains `artifact.app` or `artifact.apk` plus `manifest.json`. The
-directory name is a SHA-256 cache identity, so fingerprint values never become
-raw filesystem paths. Flat `ios_<fingerprint>.app` and
+Each entry contains `artifact.app` or `artifact.apk` plus `manifest.json` and,
+for new builds, optional privacy-safe `insight.json`. The directory name is a
+SHA-256 cache identity, so fingerprint values never become raw filesystem
+paths. Flat `ios_<fingerprint>.app` and
 `android_<fingerprint>.apk` entries created by earlier releases remain readable
 for backward compatibility but are reported as unverified legacy entries.
 
@@ -199,7 +211,7 @@ control.
 - Check that `.expo/cache` exists in the Expo project root.
 - Make sure the native build inputs have not changed. A changed fingerprint is
   expected to produce a cache miss.
-- Look for `Cache hit` or `Cache miss` in the Expo CLI output.
+- Look for `Cache hit`, `Cache miss`, and `Possible cause` in Expo CLI output.
 
 ### Clear the local cache
 
@@ -227,6 +239,10 @@ bun run build
 bun install --cwd example
 bun run --cwd example ios
 bun run --cwd example ios
+# explained A miss → A hit → B config miss → B hit
+bun run --cwd example cache:test:ios
+# build-only iOS oracle (no Simulator launch required)
+EAS_LOCAL_CACHE_TEST_DEVICE=generic bun run --cwd example cache:test:ios
 ```
 
 Use an iOS Simulator, or replace `ios` with `android` after starting an

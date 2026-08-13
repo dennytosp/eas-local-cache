@@ -28,12 +28,15 @@ bun install
 bun run verify:provider
 ```
 
-The verification checks all three integration points:
+The verification checks the integration points:
 
 - `package.json` links `eas-local-cache` from the repository root.
 - `app.json` configures `expo.buildCacheProvider` with that package.
-- The built package exports `resolveBuildCache` and `uploadBuildCache`.
+- The built package exports `calculateFingerprintHash`, `resolveBuildCache`, and
+  `uploadBuildCache`.
 - The package exposes the `eas-local-cache` inspector binary.
+- A conditional `EAS_LOCAL_CACHE_TEST_SALT` changes evaluated Expo config
+  without editing tracked or native files.
 
 ## Test a real cache round trip
 
@@ -108,3 +111,24 @@ bun run verify:provider
 The `bun run ios` and `bun run android` scripts execute native Expo builds and
 therefore exercise the build cache provider. Use `bun run start` when you only
 need the Metro development server.
+
+## Test an explained cache miss
+
+The automated native oracle generates two non-secret per-run config tokens and
+runs A miss → A hit → B explained miss → B hit:
+
+```bash
+bun run cache:test:ios
+# or, with an Android emulator already running
+bun run cache:test:android
+```
+
+Set `EAS_LOCAL_CACHE_TEST_DEVICE` to `generic` for an iOS build-only run, an iOS
+Simulator UDID for an install-and-launch run, or an Android emulator serial
+when more than one target is available.
+
+The B miss must identify Expo configuration as a possible cause. The script
+also requires exactly two new misses and two new hits, scans diagnostics for
+token leaks, and requires a healthy cache at the end. Tokens are not written to
+insight or event metadata; they only make Expo's evaluated config fingerprint
+change.
