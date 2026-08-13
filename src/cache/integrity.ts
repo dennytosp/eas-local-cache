@@ -16,9 +16,19 @@ type ExpectedArtifactShape = {
   fileCount: number;
 };
 
+type IntegrityInspectionOptions = {
+  deadlineMs?: number;
+};
+
 const MAX_APP_TREE_ENTRIES = 1_000_000;
 
 const HASH_CHUNK_BYTES = 1024 * 1024;
+
+const assertDeadline = (deadlineMs?: number): void => {
+  if (deadlineMs !== undefined && Date.now() >= deadlineMs) {
+    throw new Error("Cache integrity inspection exceeded its deadline");
+  }
+};
 
 const validateExpectedSize = (
   sizeBytes: number,
@@ -89,13 +99,15 @@ const hashOpenedFile = (
   descriptor: number,
   initialStats: fs.Stats,
   hash: crypto.Hash,
-  label: string
+  label: string,
+  deadlineMs?: number
 ): void => {
   const buffer = Buffer.allocUnsafe(
     Math.min(HASH_CHUNK_BYTES, Math.max(1, initialStats.size))
   );
   let position = 0;
   while (position < initialStats.size) {
+    assertDeadline(deadlineMs);
     const bytesRead = fs.readSync(
       descriptor,
       buffer,
@@ -147,16 +159,19 @@ const isPathInside = (root: string, candidate: string): boolean => {
   );
 };
 
-const collectRelativePaths = (root: string): string[] => {
+const collectRelativePaths = (root: string, deadlineMs?: number): string[] => {
   const entries: string[] = [];
 
   const walk = (relativeDirectory: string) => {
+    assertDeadline(deadlineMs);
     const absoluteDirectory = path.join(root, relativeDirectory);
-    const children = fs
-      .readdirSync(absoluteDirectory)
-      .sort((left, right) => left.localeCompare(right, "en"));
+    const children = fs.readdirSync(absoluteDirectory).sort((left, right) => {
+      assertDeadline(deadlineMs);
+      return left.localeCompare(right, "en");
+    });
 
     for (const child of children) {
+      assertDeadline(deadlineMs);
       const relativePath = path.posix.join(
         relativeDirectory.split(path.sep).join(path.posix.sep),
         child
@@ -179,8 +194,10 @@ const collectRelativePaths = (root: string): string[] => {
 
 const inspectFile = (
   artifactPath: string,
-  expected?: ExpectedArtifactShape
+  expected?: ExpectedArtifactShape,
+  options: IntegrityInspectionOptions = {}
 ): ArtifactIntegrity => {
+  assertDeadline(options.deadlineMs);
   if (expected && expected.fileCount !== 1) {
     throw new Error("Android cache artifact file count does not match");
   }
@@ -201,7 +218,8 @@ const inspectFile = (
       opened.descriptor,
       opened.stats,
       hash,
-      "Android cache artifact"
+      "Android cache artifact",
+      options.deadlineMs
     );
   } finally {
     fs.closeSync(opened.descriptor);
@@ -217,8 +235,10 @@ const inspectFile = (
 
 const inspectDirectory = (
   artifactPath: string,
-  expected?: ExpectedArtifactShape
+  expected?: ExpectedArtifactShape,
+  options: IntegrityInspectionOptions = {}
 ): ArtifactIntegrity => {
+  assertDeadline(options.deadlineMs);
   if (expected) {
     validateExpectedSize(
       expected.sizeBytes,
@@ -243,7 +263,11 @@ const inspectDirectory = (
   let sizeBytes = 0;
   let fileCount = 0;
 
-  for (const relativePath of collectRelativePaths(artifactPath)) {
+  for (const relativePath of collectRelativePaths(
+    artifactPath,
+    options.deadlineMs
+  )) {
+    assertDeadline(options.deadlineMs);
     const absolutePath = path.join(artifactPath, relativePath);
     const stats = fs.lstatSync(absolutePath);
 
@@ -293,7 +317,8 @@ const inspectDirectory = (
         opened.descriptor,
         opened.stats,
         hash,
-        `App bundle file ${relativePath}`
+        `App bundle file ${relativePath}`,
+        options.deadlineMs
       );
     } finally {
       fs.closeSync(opened.descriptor);
@@ -327,16 +352,19 @@ const inspectDirectory = (
 export const inspectArtifact = (
   artifactPath: string,
   platform: "android" | "ios",
-  expected?: ExpectedArtifactShape
+  expected?: ExpectedArtifactShape,
+  options: IntegrityInspectionOptions = {}
 ): ArtifactIntegrity =>
   platform === "ios"
-    ? inspectDirectory(artifactPath, expected)
-    : inspectFile(artifactPath, expected);
+    ? inspectDirectory(artifactPath, expected, options)
+    : inspectFile(artifactPath, expected, options);
 
 export const inspectPayloadFile = (
   payloadPath: string,
-  expectedSizeBytes?: number
+  expectedSizeBytes?: number,
+  options: IntegrityInspectionOptions = {}
 ): { sizeBytes: number; digest: string } => {
+  assertDeadline(options.deadlineMs);
   const opened = openRegularFile(
     payloadPath,
     MAX_COMPRESSED_BYTES,
@@ -355,7 +383,8 @@ export const inspectPayloadFile = (
       opened.descriptor,
       opened.stats,
       hash,
-      "Compressed cache payload"
+      "Compressed cache payload",
+      options.deadlineMs
     );
   } finally {
     fs.closeSync(opened.descriptor);

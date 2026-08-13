@@ -152,6 +152,92 @@ describe("cache catalog and cleanup", () => {
     expect(fs.existsSync(valid.artifact)).toBe(true);
   });
 
+  it("accounts for and prunes abandoned LAN transfer staging", async () => {
+    const seeded = await seedEntry(
+      "transfer-staging",
+      "valid",
+      "2026-08-12T00:00:00.000Z"
+    );
+    const abandoned = path.join(
+      seeded.paths.transferStagingRoot,
+      `${"a".repeat(64)}-abandoned`
+    );
+    fs.mkdirSync(abandoned, { recursive: true });
+    fs.writeFileSync(path.join(abandoned, "partial.wire"), "x".repeat(512));
+    const old = new Date("2026-08-01T00:00:00.000Z");
+    fs.utimesSync(abandoned, old, old);
+
+    const before = inventoryCache(projectRoot);
+    expect(before.usage.stagingBytes).toBeGreaterThanOrEqual(512);
+    expect(before.usage.otherBytes).toBe(0);
+
+    const result = await pruneCache(
+      projectRoot,
+      { ...unlimitedPolicy, retentionMs: 24 * 60 * 60 * 1000 },
+      { now: new Date("2026-08-13T00:00:00.000Z") }
+    );
+    expect(result.auxiliaryRemoved).toContainEqual(
+      expect.objectContaining({
+        path: abandoned,
+        category: "transfer-staging",
+      })
+    );
+    expect(fs.existsSync(abandoned)).toBe(false);
+  });
+
+  it("does not prune LAN transfer staging owned by an active transfer", async () => {
+    const seeded = await seedEntry(
+      "active-transfer-staging",
+      "valid",
+      "2026-08-12T00:00:00.000Z"
+    );
+    const entryId = "b".repeat(64);
+    fs.mkdirSync(seeded.paths.transferLocksRoot, { recursive: true });
+    const transferLock = await acquireEntryLock(
+      seeded.paths.transferLocksRoot,
+      entryId
+    );
+    expect(transferLock).not.toBeNull();
+    const active = path.join(
+      seeded.paths.transferStagingRoot,
+      `${entryId}-active`
+    );
+    fs.mkdirSync(active, { recursive: true });
+    fs.writeFileSync(path.join(active, "partial.wire"), "active-transfer");
+    const activeBody = path.join(
+      seeded.paths.transferStagingRoot,
+      `${entryId}-.wire-body-test`
+    );
+    fs.writeFileSync(activeBody, "active-ios-app-tree");
+    const old = new Date("2026-08-01T00:00:00.000Z");
+    fs.utimesSync(active, old, old);
+    fs.utimesSync(activeBody, old, old);
+
+    try {
+      const result = await pruneCache(
+        projectRoot,
+        { ...unlimitedPolicy, retentionMs: 24 * 60 * 60 * 1000 },
+        { now: new Date("2026-08-13T00:00:00.000Z") }
+      );
+      expect(result.auxiliaryRemoved).not.toContainEqual(
+        expect.objectContaining({ path: active })
+      );
+      expect(result.auxiliaryRemoved).not.toContainEqual(
+        expect.objectContaining({ path: activeBody })
+      );
+      expect(result.skipped).toContainEqual(
+        expect.objectContaining({
+          entryId,
+          reason: expect.stringContaining("active writer"),
+        })
+      );
+      expect(fs.existsSync(active)).toBe(true);
+      expect(fs.existsSync(activeBody)).toBe(true);
+    } finally {
+      if (transferLock) releaseEntryLock(transferLock);
+    }
+  });
+
   it("accounts for and removes unexpected platform storage", async () => {
     const valid = await seedEntry(
       "valid-platform",
@@ -638,6 +724,26 @@ describe("doctor and CLI", () => {
     expect(report.healthy).toBe(false);
     expect(report.issues).toContainEqual(
       expect.objectContaining({ code: "invalid-cache-insight" })
+    );
+    expect(fs.existsSync(entry.artifact)).toBe(true);
+  });
+
+  it("reports malformed trusted LAN state without contacting peers", async () => {
+    const entry = await seedEntry(
+      "doctor-lan-state",
+      "healthy",
+      "2026-08-12T00:00:00.000Z"
+    );
+    fs.mkdirSync(entry.paths.stateRoot, { mode: 0o700 });
+    fs.writeFileSync(path.join(entry.paths.stateRoot, "lan.json"), "{", {
+      mode: 0o600,
+    });
+
+    const report = doctorCache(projectRoot);
+
+    expect(report.healthy).toBe(false);
+    expect(report.issues).toContainEqual(
+      expect.objectContaining({ code: "invalid-lan-state" })
     );
     expect(fs.existsSync(entry.artifact)).toBe(true);
   });

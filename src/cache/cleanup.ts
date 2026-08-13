@@ -47,7 +47,13 @@ export type PruneResult = {
 
 export type AuxiliaryPruneCandidate = {
   path: string;
-  category: "staging" | "quarantine" | "trash" | "invalid-entry" | "restore";
+  category:
+    | "staging"
+    | "transfer-staging"
+    | "quarantine"
+    | "trash"
+    | "invalid-entry"
+    | "restore";
   sizeBytes: number;
   modifiedAt: string;
   entryId: string | null;
@@ -72,7 +78,7 @@ const getAuxiliaryEntryId = (
   name: string
 ): string | null => {
   const pattern =
-    category === "staging"
+    category === "staging" || category === "transfer-staging"
       ? /^([a-f0-9]{64})-/
       : category === "restore"
       ? /^([a-f0-9]{64})$/
@@ -109,6 +115,7 @@ const listAuxiliary = (
     ["trash", catalog.paths.trashRoot],
     ["staging", catalog.paths.stagingRoot],
     ["staging", catalog.paths.restoreStagingRoot],
+    ["transfer-staging", catalog.paths.transferStagingRoot],
     ["quarantine", catalog.paths.quarantineRoot],
   ] as const;
 
@@ -265,6 +272,7 @@ const addAuxiliaryForSize = (
     ["quarantine", catalog.paths.quarantineRoot],
     ["staging", catalog.paths.stagingRoot],
     ["staging", catalog.paths.restoreStagingRoot],
+    ["transfer-staging", catalog.paths.transferStagingRoot],
   ] as const) {
     if (!pathExists(root)) {
       continue;
@@ -573,11 +581,15 @@ export const pruneCache = async (
           continue;
         }
         if (candidate.entryId) {
-          entryLock = await acquireEntryLock(
-            catalog.paths.locksRoot,
-            candidate.entryId,
-            { maxWaitMs: 0, retryIntervalMs: 1 }
-          );
+          const lockRoot =
+            candidate.category === "transfer-staging"
+              ? catalog.paths.transferLocksRoot
+              : catalog.paths.locksRoot;
+          ensureManagedDirectory(catalog.paths.providerRoot, lockRoot);
+          entryLock = await acquireEntryLock(lockRoot, candidate.entryId, {
+            maxWaitMs: 0,
+            retryIntervalMs: 1,
+          });
           if (!entryLock) {
             skipped.push({
               entryId: candidate.entryId,

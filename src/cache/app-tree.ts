@@ -192,7 +192,17 @@ const writeRecordHeader = (
   return header.length;
 };
 
-const collectSourceRecords = (sourceRoot: string): SourceRecord[] => {
+const assertDeadline = (deadlineMs?: number): void => {
+  if (deadlineMs !== undefined && Date.now() >= deadlineMs) {
+    throw new Error("App-tree encoding exceeded its deadline");
+  }
+};
+
+const collectSourceRecords = (
+  sourceRoot: string,
+  deadlineMs?: number
+): SourceRecord[] => {
+  assertDeadline(deadlineMs);
   const rootStats = fs.lstatSync(sourceRoot);
   if (rootStats.isSymbolicLink() || !rootStats.isDirectory()) {
     throw new Error("App-tree source root must be a real directory");
@@ -204,8 +214,10 @@ const collectSourceRecords = (sourceRoot: string): SourceRecord[] => {
     absoluteDirectory: string,
     relativeDirectory: string
   ): void => {
+    assertDeadline(deadlineMs);
     const names = fs.readdirSync(absoluteDirectory, { encoding: "buffer" });
     for (const nameBytes of names) {
+      assertDeadline(deadlineMs);
       const name = decodeUtf8(nameBytes, "App-tree source name");
       const relativePath = relativeDirectory
         ? `${relativeDirectory}/${name}`
@@ -234,9 +246,10 @@ const collectSourceRecords = (sourceRoot: string): SourceRecord[] => {
     }
   };
   visit(sourceRoot, "");
-  records.sort((left, right) =>
-    Buffer.compare(left.pathBytes, right.pathBytes)
-  );
+  records.sort((left, right) => {
+    assertDeadline(deadlineMs);
+    return Buffer.compare(left.pathBytes, right.pathBytes);
+  });
   const aliases = new Map<string, string>();
   for (let index = 1; index < records.length; index += 1) {
     if (
@@ -249,6 +262,7 @@ const collectSourceRecords = (sourceRoot: string): SourceRecord[] => {
     }
   }
   for (const record of records) {
+    assertDeadline(deadlineMs);
     const aliasKey = filesystemAliasKey(record.path);
     const aliasedPath = aliases.get(aliasKey);
     if (aliasedPath !== undefined && aliasedPath !== record.path) {
@@ -267,12 +281,14 @@ const openNoFollow = (
 
 export const encodeAppTree = async (
   sourceRoot: string,
-  archivePath: string
+  archivePath: string,
+  options: { deadlineMs?: number } = {}
 ): Promise<AppTreeArchiveStats> => {
-  const records = collectSourceRecords(sourceRoot);
+  const records = collectSourceRecords(sourceRoot, options.deadlineMs);
   let sizeBytes = 0;
   let fileCount = 0;
   for (const record of records) {
+    assertDeadline(options.deadlineMs);
     if (record.stats.isFile()) {
       checkedInteger(
         record.stats.size,
@@ -303,6 +319,7 @@ export const encodeAppTree = async (
     writeAll(descriptor, MAGIC);
     archiveBytes += MAGIC.length;
     for (const record of records) {
+      assertDeadline(options.deadlineMs);
       const mode = record.stats.mode & 0o7777;
       if (record.stats.isDirectory()) {
         if (
@@ -391,6 +408,7 @@ export const encodeAppTree = async (
         const buffer = Buffer.allocUnsafe(IO_BUFFER_BYTES);
         let remaining = record.stats.size;
         while (remaining > 0) {
+          assertDeadline(options.deadlineMs);
           const read = fs.readSync(
             input,
             buffer,
@@ -416,6 +434,7 @@ export const encodeAppTree = async (
       }
     }
     writeAll(descriptor, Buffer.from([END]));
+    assertDeadline(options.deadlineMs);
     archiveBytes += 1;
     if (archiveBytes > archiveBound) {
       throw new Error("App-tree archive exceeds its metadata allowance");

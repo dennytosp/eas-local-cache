@@ -7,10 +7,12 @@ import {
   DEFAULT_CACHE_POLICY,
   DEFAULT_COMPRESSION_OPTIONS,
   DEFAULT_ENVIRONMENT_OPTIONS,
+  DEFAULT_LAN_OPTIONS,
   formatSizeBytes,
   normalizeCacheOptions,
   normalizeCompressionOptions,
   normalizeEnvironmentOptions,
+  normalizeLanOptions,
   parseSizeBytes,
 } from "../src/cache/options";
 import { readPolicyState, writePolicyState } from "../src/cache/policy-state";
@@ -185,6 +187,20 @@ describe("cache provider options", () => {
     const invalid = { compression: "gzip" } as never;
     expect(() => normalizeCompressionOptions(invalid)).toThrow(
       'compression must be "off" or "zstd"'
+    );
+    expect(() => normalizeCacheOptions(invalid)).toThrow();
+  });
+
+  it("keeps LAN sharing opt-in and validates its capability mode", () => {
+    expect(normalizeLanOptions()).toEqual({ lanMode: "off" });
+    expect(normalizeLanOptions({ lan: "read" })).toEqual({ lanMode: "read" });
+    expect(normalizeLanOptions({ lan: "read-write" })).toEqual({
+      lanMode: "read-write",
+    });
+    expect(Object.isFrozen(DEFAULT_LAN_OPTIONS)).toBe(true);
+    const invalid = { lan: "open" } as never;
+    expect(() => normalizeLanOptions(invalid)).toThrow(
+      'lan must be "off", "read", or "read-write"'
     );
     expect(() => normalizeCacheOptions(invalid)).toThrow();
   });

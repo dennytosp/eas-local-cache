@@ -2,9 +2,11 @@ import * as crypto from "crypto";
 
 export const TOOLCHAIN_MODES = ["safe", "strict", "off"] as const;
 export const COMPRESSION_MODES = ["off", "zstd"] as const;
+export const LAN_MODES = ["off", "read", "read-write"] as const;
 
 export type ToolchainMode = (typeof TOOLCHAIN_MODES)[number];
 export type CompressionMode = (typeof COMPRESSION_MODES)[number];
+export type LanMode = (typeof LAN_MODES)[number];
 
 export type CacheProviderOptions = {
   maxSize?: string | number | null;
@@ -14,6 +16,7 @@ export type CacheProviderOptions = {
   toolchain?: ToolchainMode;
   environmentKey?: string;
   compression?: CompressionMode;
+  lan?: LanMode;
 };
 
 export type NormalizedCachePolicy = {
@@ -30,6 +33,10 @@ export type NormalizedEnvironmentOptions = {
 
 export type NormalizedCompressionOptions = {
   compressionMode: CompressionMode;
+};
+
+export type NormalizedLanOptions = {
+  lanMode: LanMode;
 };
 
 const GIBIBYTE = 1024 ** 3;
@@ -51,6 +58,9 @@ export const DEFAULT_ENVIRONMENT_OPTIONS: Readonly<NormalizedEnvironmentOptions>
 
 export const DEFAULT_COMPRESSION_OPTIONS: Readonly<NormalizedCompressionOptions> =
   Object.freeze({ compressionMode: "off" });
+
+export const DEFAULT_LAN_OPTIONS: Readonly<NormalizedLanOptions> =
+  Object.freeze({ lanMode: "off" });
 
 const MAX_ENVIRONMENT_KEY_CHARACTERS = 512;
 
@@ -146,6 +156,19 @@ export const normalizeCompressionOptions = (
   };
 };
 
+export const normalizeLanOptions = (
+  options: CacheProviderOptions = {}
+): NormalizedLanOptions => {
+  assertProviderOptions(options);
+  if (
+    options.lan !== undefined &&
+    !LAN_MODES.includes(options.lan as LanMode)
+  ) {
+    throw new Error('lan must be "off", "read", or "read-write"');
+  }
+  return { lanMode: options.lan ?? DEFAULT_LAN_OPTIONS.lanMode };
+};
+
 export const parseSizeBytes = (value: string | number): number => {
   if (typeof value === "number") {
     return assertSafeNonNegativeInteger(value, "maxSize");
@@ -217,6 +240,7 @@ export const normalizeCacheOptions = (
   assertProviderOptions(options);
   normalizeEnvironmentOptions(options);
   normalizeCompressionOptions(options);
+  normalizeLanOptions(options);
   if (
     options.autoPrune !== undefined &&
     typeof options.autoPrune !== "boolean"

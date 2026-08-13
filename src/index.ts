@@ -32,6 +32,7 @@ import {
   normalizeCacheOptions,
   normalizeCompressionOptions,
   normalizeEnvironmentOptions,
+  normalizeLanOptions,
   type CacheProviderOptions,
 } from "./cache/options";
 import { getCachePaths, getEntryId, type CachePlatform } from "./cache/paths";
@@ -48,6 +49,8 @@ import {
   type CacheMissReason,
 } from "./cache/store";
 import { discoverToolchain } from "./cache/toolchain";
+import { readLanState, updateLanState } from "./lan/state";
+import { fetchLanEntryToLocal, pushLanEntryToPeer } from "./lan/sync";
 
 type CalculationState = {
   fingerprintHash: string;
@@ -147,6 +150,21 @@ const setPendingBuild = (
 
 const shortFingerprint = (fingerprintHash: string): string =>
   fingerprintHash.replace(/[\r\n\t]/g, "").slice(0, 12);
+
+const recordLanPeerSuccess = async (
+  providerRoot: string,
+  peerId: string
+): Promise<void> => {
+  await updateLanState(providerRoot, (state) => {
+    const peer = state.outboundPeers.find(
+      (candidate) => candidate.peerId === peerId
+    );
+    if (peer) {
+      peer.lastSuccessAt = new Date().toISOString();
+      peer.updatedAt = peer.lastSuccessAt;
+    }
+  });
+};
 
 const getStateKey = (
   projectRoot: string,
@@ -431,11 +449,61 @@ const plugin: BuildCacheProviderPlugin<CacheProviderOptions> = {
     console.log(`Searching for ${platform} cache entry ${fingerprint}`);
 
     try {
-      const result = await resolveCacheEntryDetailed({
+      let result = await resolveCacheEntryDetailed({
         projectRoot,
         platform,
         fingerprintHash,
       });
+      if (result.outcome === "miss" && result.reason !== "lock-busy") {
+        try {
+          const { lanMode } = normalizeLanOptions(options);
+          if (lanMode !== "off") {
+            const paths = getCachePaths(fs.realpathSync(projectRoot));
+            const state = readLanState(paths.providerRoot);
+            if (state) {
+              const fetched = await fetchLanEntryToLocal({
+                projectRoot,
+                clientId: state.clientId,
+                peers: state.outboundPeers,
+                platform,
+                entryId: getEntryId(platform, fingerprintHash),
+                ...(result.reason === "compression-unavailable" &&
+                result.compressedPayloadDigest
+                  ? {
+                      replaceCompressedPayloadDigest:
+                        result.compressedPayloadDigest,
+                    }
+                  : {}),
+              });
+              if (fetched.imported) {
+                result = await resolveCacheEntryDetailed({
+                  projectRoot,
+                  platform,
+                  fingerprintHash,
+                });
+                if (result.outcome === "hit") {
+                  if (fetched.peerId) {
+                    await recordLanPeerSuccess(
+                      paths.providerRoot,
+                      fetched.peerId
+                    ).catch(() => {});
+                  }
+                  console.log(
+                    fetched.peerId
+                      ? `LAN cache hit from peer ${fetched.peerId.slice(0, 12)}`
+                      : "LAN cache entry became available locally"
+                  );
+                }
+              }
+            }
+          }
+        } catch (error) {
+          console.warn(
+            "LAN cache lookup was skipped; continuing with the local cache",
+            error instanceof Error ? error.message : error
+          );
+        }
+      }
       const lookupDurationMs = elapsedMilliseconds(startedAt);
 
       if (result.outcome === "hit") {
@@ -621,6 +689,38 @@ const plugin: BuildCacheProviderPlugin<CacheProviderOptions> = {
           }
         } catch (error) {
           console.warn("Automatic cache cleanup was skipped", error);
+        }
+        try {
+          const { lanMode } = normalizeLanOptions(options);
+          if (lanMode === "read-write") {
+            const paths = getCachePaths(fs.realpathSync(projectRoot));
+            const state = readLanState(paths.providerRoot);
+            if (state) {
+              const pushed = await pushLanEntryToPeer({
+                projectRoot,
+                clientId: state.clientId,
+                peers: state.outboundPeers,
+                platform,
+                entryId,
+              });
+              if (pushed.uploaded) {
+                if (pushed.peerId) {
+                  await recordLanPeerSuccess(
+                    paths.providerRoot,
+                    pushed.peerId
+                  ).catch(() => {});
+                }
+                console.log(
+                  `Shared cache entry with peer ${pushed.peerId?.slice(0, 12)}`
+                );
+              }
+            }
+          }
+        } catch (error) {
+          console.warn(
+            "LAN cache upload was skipped; the local artifact remains usable",
+            error instanceof Error ? error.message : error
+          );
         }
       }
       return cachePath;
