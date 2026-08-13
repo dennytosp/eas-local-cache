@@ -25,6 +25,8 @@ Status: implemented on `feat/cache-inspector`.
 
 ## Milestone 3: Explainable Cache
 
+Status: implemented on `feat/explain-cache-miss`.
+
 - Persist comparable fingerprint input snapshots
 - Compare a miss with the closest compatible previous entry
 - Report evidence-backed changed input groups as possible miss causes
@@ -37,7 +39,14 @@ Status: implemented on `feat/cache-inspector`.
   signals
 - Keep strict toolchain keying opt-in where compatibility is uncertain
 
-## Milestone 5: Trusted LAN Cache
+## Milestone 5: Storage Efficiency
+
+- Optional zstd compression for artifacts at rest
+- Bounded, atomic restore staging for Expo-compatible artifact paths
+- Compression savings visible in Cache Inspector output
+- Automatic fallback when zstd is unavailable or compressed data is damaged
+
+## Milestone 6: Trusted LAN Cache
 
 - Opt-in `serve` and `pair` workflow instead of ambient peer trust
 - Authenticated peer discovery and transfer

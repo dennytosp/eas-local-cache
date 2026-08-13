@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   including JSON output and a non-mutating prune preview.
 - Atomic last-access metadata and automatic TTL/LRU cleanup with configurable
   size and entry-count soft caps.
+- Privacy-safe Expo fingerprint snapshots and evidence-backed cache-miss
+  explanations without persisting raw config or source contents.
+- Bounded per-resolve telemetry with retained hit rate, lookup duration, and a
+  conservative artifact-timestamp estimate of native build time avoided.
 
 ### Changed
 

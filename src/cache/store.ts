@@ -12,6 +12,11 @@ import {
   pathExists,
 } from "./filesystem";
 import { inspectArtifact } from "./integrity";
+import {
+  INSIGHT_FILENAME,
+  writeInsightAtomically,
+  type CacheInsight,
+} from "./insight";
 import { acquireEntryLock, releaseEntryLock } from "./lock";
 import { CACHE_SCHEMA_VERSION, CacheManifest, writeManifest } from "./manifest";
 import {
@@ -29,6 +34,24 @@ type CacheIdentity = {
   platform: CachePlatform;
   fingerprintHash: string;
 };
+
+export type CacheMissReason =
+  | "not-found"
+  | "corrupt"
+  | "lock-busy"
+  | "unsafe-legacy-path"
+  | "legacy-invalid";
+
+export type CacheResolveResult =
+  | {
+      outcome: "hit";
+      path: string;
+      source: "versioned" | "legacy";
+    }
+  | {
+      outcome: "miss";
+      reason: CacheMissReason;
+    };
 
 const getPackageVersion = (): string => {
   try {
@@ -99,15 +122,16 @@ const isLegacyArtifactValid = (
   }
 };
 
-export const resolveCacheEntry = async ({
+export const resolveCacheEntryDetailed = async ({
   projectRoot,
   platform,
   fingerprintHash,
-}: CacheIdentity): Promise<string | null> => {
+}: CacheIdentity): Promise<CacheResolveResult> => {
   const managedProjectRoot = fs.realpathSync(projectRoot);
   const paths = getCachePaths(managedProjectRoot);
   const entryId = getEntryId(platform, fingerprintHash);
   const entryDirectory = getEntryDirectory(paths, platform, entryId);
+  let versionedMissReason: CacheMissReason | null = null;
 
   if (pathExists(entryDirectory)) {
     assertProviderRoot(managedProjectRoot, paths.providerRoot);
@@ -145,26 +169,53 @@ export const resolveCacheEntry = async ({
           } catch (error) {
             console.warn("Could not update cache access metadata", error);
           }
-          return revalidation.artifactPath;
+          return {
+            outcome: "hit",
+            path: revalidation.artifactPath,
+            source: "versioned",
+          };
         }
       } finally {
         releaseEntryLock(lock);
       }
+      versionedMissReason = "corrupt";
+    } else {
+      versionedMissReason = "lock-busy";
     }
   }
 
   const legacyPath = getLegacyArtifactPath(paths, platform, fingerprintHash);
-  if (legacyPath && isLegacyArtifactValid(legacyPath, platform)) {
+  if (!legacyPath) {
+    return {
+      outcome: "miss",
+      reason: versionedMissReason ?? "unsafe-legacy-path",
+    };
+  }
+  if (isLegacyArtifactValid(legacyPath, platform)) {
     console.warn(`Using unverified legacy ${platform} cache entry`);
-    return legacyPath;
+    return { outcome: "hit", path: legacyPath, source: "legacy" };
+  }
+  if (pathExists(legacyPath)) {
+    return {
+      outcome: "miss",
+      reason: versionedMissReason ?? "legacy-invalid",
+    };
   }
 
-  return null;
+  return { outcome: "miss", reason: versionedMissReason ?? "not-found" };
+};
+
+export const resolveCacheEntry = async (
+  identity: CacheIdentity
+): Promise<string | null> => {
+  const result = await resolveCacheEntryDetailed(identity);
+  return result.outcome === "hit" ? result.path : null;
 };
 
 export const uploadCacheEntry = async (
   { projectRoot, platform, fingerprintHash }: CacheIdentity,
-  buildPath: string
+  buildPath: string,
+  options: { insight?: CacheInsight } = {}
 ): Promise<string | null> => {
   validateSourceArtifact(buildPath, platform);
 
@@ -243,6 +294,27 @@ export const uploadCacheEntry = async (
       },
     };
     writeManifest(stagingDirectory, manifest);
+    if (options.insight) {
+      try {
+        if (
+          options.insight.platform !== platform ||
+          options.insight.fingerprintHash !== fingerprintHash ||
+          options.insight.entryId !== entryId
+        ) {
+          throw new Error("Cache insight identity does not match the entry");
+        }
+        writeInsightAtomically(stagingDirectory, options.insight);
+      } catch (error) {
+        try {
+          fs.rmSync(path.join(stagingDirectory, INSIGHT_FILENAME), {
+            force: true,
+          });
+        } catch {
+          // Diagnostic metadata must never block artifact publication.
+        }
+        console.warn("Could not persist cache insight", error);
+      }
+    }
 
     const stagedValidation = validateEntry(
       stagingDirectory,

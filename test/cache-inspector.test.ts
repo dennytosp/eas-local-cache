@@ -7,6 +7,7 @@ import { removeAccessRecord, touchAccessRecord } from "../src/cache/access";
 import { inventoryCache } from "../src/cache/catalog";
 import { planPrune, pruneCache } from "../src/cache/cleanup";
 import { doctorCache } from "../src/cache/doctor";
+import { recordResolveEvent, scanResolveEvents } from "../src/cache/events";
 import { acquireEntryLock, releaseEntryLock } from "../src/cache/lock";
 import type { NormalizedCachePolicy } from "../src/cache/options";
 import { getCachePaths, getEntryId } from "../src/cache/paths";
@@ -263,6 +264,45 @@ describe("cache catalog and cleanup", () => {
     expect(inventoryCache(projectRoot).entries).toHaveLength(1);
   });
 
+  it("prunes telemetry separately from artifact capacity", async () => {
+    const entry = await seedEntry(
+      "telemetry-entry",
+      "artifact",
+      "2026-08-12T00:00:00.000Z"
+    );
+    const recorded = await recordResolveEvent(
+      entry.paths.providerRoot,
+      entry.paths.eventsRoot,
+      {
+        platform: "android",
+        entryId: entry.entryId,
+        outcome: "miss",
+        lookupDurationMs: 12,
+        explanationCode: "no-entry",
+      },
+      { nowMs: Date.parse("2026-01-01T00:00:00.000Z") }
+    );
+    expect(recorded.status).toBe("recorded");
+
+    const dryRun = await pruneCache(projectRoot, unlimitedPolicy, {
+      dryRun: true,
+      now: new Date("2026-08-13T00:00:00.000Z"),
+    });
+    expect(dryRun.telemetryCandidates).toHaveLength(1);
+    expect(dryRun.reclaimedBytes).toBe(0);
+    expect(dryRun.telemetryReclaimedBytes).toBe(0);
+    expect(fs.existsSync(entry.artifact)).toBe(true);
+
+    const result = await pruneCache(projectRoot, unlimitedPolicy, {
+      now: new Date("2026-08-13T00:00:00.000Z"),
+    });
+    expect(result.telemetryRemoved).toHaveLength(1);
+    expect(result.telemetryReclaimedBytes).toBeGreaterThan(0);
+    expect(result.reclaimedBytes).toBe(0);
+    expect(scanResolveEvents(entry.paths.eventsRoot).events).toEqual([]);
+    expect(fs.existsSync(entry.artifact)).toBe(true);
+  });
+
   it("does not evict an entry with an active lock", async () => {
     const seeded = await seedEntry(
       "locked",
@@ -430,6 +470,26 @@ describe("doctor and CLI", () => {
     );
   });
 
+  it("reports malformed optional insight without invalidating the artifact", async () => {
+    const entry = await seedEntry(
+      "doctor-insight",
+      "healthy",
+      "2026-08-12T00:00:00.000Z"
+    );
+    fs.writeFileSync(
+      path.join(path.dirname(entry.artifact), "insight.json"),
+      "{"
+    );
+
+    const report = doctorCache(projectRoot);
+
+    expect(report.healthy).toBe(false);
+    expect(report.issues).toContainEqual(
+      expect.objectContaining({ code: "invalid-cache-insight" })
+    );
+    expect(fs.existsSync(entry.artifact)).toBe(true);
+  });
+
   it("emits machine-readable stats and list output", async () => {
     await seedEntry("cli", "cli", "2026-08-12T00:00:00.000Z");
 
@@ -460,6 +520,66 @@ describe("doctor and CLI", () => {
         expect(parsed.legacyEntries).toEqual([]);
       }
     }
+  });
+
+  it("reports retained hit rate and conservative time saved", async () => {
+    const entry = await seedEntry(
+      "stats-events",
+      "cli",
+      "2026-08-12T00:00:00.000Z"
+    );
+    for (const event of [
+      {
+        outcome: "miss" as const,
+        lookupDurationMs: 20,
+        explanationCode: "no-entry" as const,
+      },
+      {
+        outcome: "hit" as const,
+        lookupDurationMs: 5,
+        explanationCode: "hit" as const,
+        estimatedTimeSavedMs: 1_000,
+      },
+    ]) {
+      expect(
+        (
+          await recordResolveEvent(
+            entry.paths.providerRoot,
+            entry.paths.eventsRoot,
+            { platform: "android", entryId: entry.entryId, ...event }
+          )
+        ).status
+      ).toBe("recorded");
+    }
+
+    let output = "";
+    const write = spyOn(process.stdout, "write").mockImplementation(((
+      chunk: string | Uint8Array
+    ) => {
+      output += chunk.toString();
+      return true;
+    }) as typeof process.stdout.write);
+    const status = await runCli([
+      "stats",
+      "--project-root",
+      projectRoot,
+      "--json",
+    ]);
+    write.mockRestore();
+
+    expect(status).toBe(0);
+    const parsed = JSON.parse(output) as {
+      hitRate: number;
+      estimatedTimeSavedMs: number;
+      telemetry: { eventCount: number; hits: number; misses: number };
+      usage: { eventsBytes: number };
+    };
+    expect(parsed.hitRate).toBe(0.5);
+    expect(parsed.estimatedTimeSavedMs).toBe(1_000);
+    expect(parsed.telemetry).toEqual(
+      expect.objectContaining({ eventCount: 2, hits: 1, misses: 1 })
+    );
+    expect(parsed.usage.eventsBytes).toBeGreaterThan(0);
   });
 
   it("rejects prune-only policy options on read-only commands", async () => {

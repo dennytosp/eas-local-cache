@@ -2,6 +2,7 @@ import * as fs from "fs";
 import * as path from "path";
 
 import { readAccessRecord } from "./access";
+import { scanResolveEvents } from "./events";
 import {
   assertManagedDirectory,
   assertProviderRoot,
@@ -44,6 +45,10 @@ export type CacheCatalog = {
     protectedUntil: string | null;
   }>;
   issues: CatalogIssue[];
+  telemetry: {
+    eventCount: number;
+    invalidEventCount: number;
+  };
   usage: {
     entriesBytes: number;
     invalidEntriesBytes: number;
@@ -53,6 +58,7 @@ export type CacheCatalog = {
     accessBytes: number;
     stateBytes: number;
     locksBytes: number;
+    eventsBytes: number;
     otherBytes: number;
     legacyBytes: number;
     managedBytes: number;
@@ -345,6 +351,7 @@ export const inventoryCache = (projectRoot: string): CacheCatalog => {
       entries: [],
       invalidEntries: [],
       issues: [],
+      telemetry: { eventCount: 0, invalidEventCount: 0 },
       legacyEntries,
       usage: {
         entriesBytes: 0,
@@ -355,6 +362,7 @@ export const inventoryCache = (projectRoot: string): CacheCatalog => {
         accessBytes: 0,
         stateBytes: 0,
         locksBytes: 0,
+        eventsBytes: 0,
         otherBytes: 0,
         legacyBytes,
         managedBytes: 0,
@@ -380,6 +388,7 @@ export const inventoryCache = (projectRoot: string): CacheCatalog => {
           severity: "error",
         },
       ],
+      telemetry: { eventCount: 0, invalidEventCount: 0 },
       legacyEntries: [],
       usage: {
         entriesBytes: 0,
@@ -390,6 +399,7 @@ export const inventoryCache = (projectRoot: string): CacheCatalog => {
         accessBytes: 0,
         stateBytes: 0,
         locksBytes: 0,
+        eventsBytes: 0,
         otherBytes: 0,
         legacyBytes: 0,
         managedBytes: 0,
@@ -448,6 +458,37 @@ export const inventoryCache = (projectRoot: string): CacheCatalog => {
     issues,
     "unsafe-locks-root"
   );
+  const eventsBytes = safeDirectorySize(
+    paths.providerRoot,
+    paths.eventsRoot,
+    issues,
+    "unsafe-events-root"
+  );
+  let eventCount = 0;
+  let invalidEventCount = 0;
+  try {
+    const eventScan = scanResolveEvents(paths.eventsRoot);
+    eventCount = eventScan.events.length;
+    invalidEventCount = eventScan.invalid.length;
+    for (const invalid of eventScan.invalid) {
+      issues.push({
+        code: "invalid-resolve-event",
+        path: invalid.filePath,
+        message: invalid.reason,
+        severity: "warning",
+      });
+    }
+  } catch (error) {
+    if (pathExists(paths.eventsRoot)) {
+      issues.push({
+        code: "unreadable-events-root",
+        path: paths.eventsRoot,
+        message:
+          error instanceof Error ? error.message : "Events root is unreadable",
+        severity: "error",
+      });
+    }
+  }
   const legacyBytes = legacyEntries.reduce(
     (total, entry) => total + entry.sizeBytes,
     0
@@ -460,7 +501,8 @@ export const inventoryCache = (projectRoot: string): CacheCatalog => {
     trashBytes +
     accessBytes +
     stateBytes +
-    locksBytes;
+    locksBytes +
+    eventsBytes;
   const otherBytes = Math.max(0, providerBytes - categorizedProviderBytes);
   const managedBytes =
     entriesStorageBytes + stagingBytes + quarantineBytes + trashBytes;
@@ -471,6 +513,7 @@ export const inventoryCache = (projectRoot: string): CacheCatalog => {
     entries,
     invalidEntries,
     issues,
+    telemetry: { eventCount, invalidEventCount },
     legacyEntries,
     usage: {
       entriesBytes,
@@ -481,6 +524,7 @@ export const inventoryCache = (projectRoot: string): CacheCatalog => {
       accessBytes,
       stateBytes,
       locksBytes,
+      eventsBytes,
       otherBytes,
       legacyBytes,
       managedBytes,
