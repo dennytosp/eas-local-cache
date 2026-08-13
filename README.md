@@ -33,7 +33,18 @@ Supported project types:
 | Bare project using Expo CLI `expo run:*` | Yes |
 | Pure React Native CLI `react-native run-*` | No |
 | `eas build` or `eas build --local` | No |
-| Physical iOS device build | No; Expo only invokes this provider for Simulator builds |
+
+Supported build targets:
+
+| Target | Cache supported? |
+| --- | ---: |
+| Android Emulator | Yes |
+| Android physical device | Yes |
+| iOS Simulator | Yes |
+| iPhone or iPad physical device | No; Expo CLI skips build-cache providers for physical iOS builds |
+
+The physical iOS limitation comes from Expo CLI, not this package. See Expo's
+[build cache provider limitations](https://docs.expo.dev/guides/cache-builds-remotely/#limitations).
 
 ## Install
 
