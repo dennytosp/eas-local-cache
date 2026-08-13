@@ -38,7 +38,8 @@
         "maxEntries": 50,
         "retentionDays": 14,
         "autoPrune": true,
-        "toolchain": "safe"
+        "toolchain": "safe",
+        "compression": "off"
       }
     },
     "experiments": {
