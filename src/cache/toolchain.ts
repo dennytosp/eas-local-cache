@@ -1,6 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import { execFile } from "child_process";
+import { createRequire } from "module";
 
 import type { CachePlatform } from "./paths";
 
@@ -8,6 +9,8 @@ const COMMAND_TIMEOUT_MS = 2_000;
 const DISCOVERY_TIMEOUT_MS = 5_000;
 const MAX_OUTPUT_BYTES = 64 * 1024;
 const MAX_WRAPPER_BYTES = 64 * 1024;
+const MAX_ANDROID_CONFIGURATION_BYTES = 1024 * 1024;
+const MAX_ANDROID_PACKAGE_PROPERTIES_BYTES = 64 * 1024;
 const MAX_TOKEN_LENGTH = 128;
 
 export type ToolchainMode = "safe" | "strict";
@@ -40,6 +43,9 @@ export type IosToolchainSnapshot = {
 export type AndroidToolchainSnapshot = {
   platform: "android";
   hostArch: HostArchitecture;
+  compileSdkVersion?: string;
+  androidSdkPlatformRevision?: string;
+  buildToolsVersion?: string;
   javaSpecificationVersion: string;
   javaVendorFamily: JavaVendorFamily;
   jvmArch: JvmArchitecture;
@@ -66,12 +72,24 @@ export type ToolchainCommandResult = { stdout: string; stderr: string };
 export type ToolchainCommandRunner = (
   request: ToolchainCommandRequest
 ) => Promise<ToolchainCommandResult>;
+export type ToolchainModuleResolver = (
+  specifier: string,
+  projectRoot: string
+) => string;
+
+export type ToolchainFileSystem = {
+  openSync(filename: string, flags: number): number;
+  fstatSync(descriptor: number): Pick<fs.Stats, "isFile" | "size">;
+  readFileSync(descriptor: number, encoding: "utf8"): string;
+  closeSync(descriptor: number): void;
+};
 
 export type ToolchainDiscoveryReason =
   | "command-failed"
   | "discovery-timeout"
   | "invalid-run-profile"
   | "malformed-output"
+  | "missing-sdk"
   | "missing-wrapper"
   | "target-ambiguous"
   | "target-unavailable"
@@ -87,6 +105,8 @@ export type ToolchainDiscoveryRequest = {
   runOptions: unknown;
   mode: ToolchainMode;
   runner?: ToolchainCommandRunner;
+  fileSystem?: ToolchainFileSystem;
+  moduleResolver?: ToolchainModuleResolver;
   env?: NodeJS.ProcessEnv;
   hostArch?: string;
 };
@@ -179,6 +199,18 @@ const command = (
     maxOutputBytes: MAX_OUTPUT_BYTES,
   });
 
+const nodeFileSystem: ToolchainFileSystem = {
+  openSync: (filename, flags) => fs.openSync(filename, flags),
+  fstatSync: (descriptor) => fs.fstatSync(descriptor),
+  readFileSync: (descriptor, encoding) => fs.readFileSync(descriptor, encoding),
+  closeSync: (descriptor) => fs.closeSync(descriptor),
+};
+
+const resolveProjectModule: ToolchainModuleResolver = (
+  specifier,
+  projectRoot
+) => createRequire(path.join(projectRoot, "package.json")).resolve(specifier);
+
 const discoverIos = async (
   projectRoot: string,
   mode: ToolchainMode,
@@ -245,7 +277,42 @@ const discoverIos = async (
   };
 };
 
-const readWrapperProperties = (projectRoot: string, mode: ToolchainMode) => {
+const readBoundedRegularFile = (
+  fileSystem: ToolchainFileSystem,
+  filename: string,
+  maximumBytes: number
+): string => {
+  const descriptor = fileSystem.openSync(
+    filename,
+    fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW
+  );
+  try {
+    const stats = fileSystem.fstatSync(descriptor);
+    if (!stats.isFile() || stats.size <= 0 || stats.size > maximumBytes) {
+      throw new Error("Invalid bounded toolchain file");
+    }
+    return fileSystem.readFileSync(descriptor, "utf8");
+  } finally {
+    fileSystem.closeSync(descriptor);
+  }
+};
+
+const parsePropertyFile = (contents: string): Map<string, string> => {
+  const properties = new Map<string, string>();
+  for (const line of contents.split(/\r?\n/)) {
+    const match = line.match(/^\s*([^#!\s][^=:\s]*)\s*[=:]\s*(.*?)\s*$/);
+    if (match?.[1] && match[2] !== undefined) {
+      properties.set(match[1], match[2].replace(/\\:/g, ":"));
+    }
+  }
+  return properties;
+};
+
+const readWrapperProperties = (
+  projectRoot: string,
+  mode: ToolchainMode,
+  fileSystem: ToolchainFileSystem
+) => {
   const filename = path.join(
     projectRoot,
     "android",
@@ -253,49 +320,301 @@ const readWrapperProperties = (projectRoot: string, mode: ToolchainMode) => {
     "wrapper",
     "gradle-wrapper.properties"
   );
-  const descriptor = fs.openSync(
+  const contents = readBoundedRegularFile(
+    fileSystem,
     filename,
-    fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW
+    MAX_WRAPPER_BYTES
   );
+  const properties = parsePropertyFile(contents);
+  const distributionUrl = properties.get("distributionUrl") ?? "";
+  const basename = distributionUrl.split(/[\\/]/).pop() ?? "";
+  const gradleVersion = boundedToken(
+    basename.match(/^gradle-([0-9][0-9A-Za-z.+-]*)-(?:bin|all)\.zip$/)?.[1] ??
+      "",
+    /^[0-9A-Za-z.+-]+$/
+  );
+  const distributionBasename = boundedToken(
+    basename,
+    /^gradle-[0-9A-Za-z.+-]+-(?:bin|all)\.zip$/
+  );
+  const checksumValue = properties.get("distributionSha256Sum");
+  const checksum = checksumValue
+    ? boundedToken(checksumValue.toLowerCase(), /^[a-f0-9]{64}$/)
+    : null;
+  if (
+    !gradleVersion ||
+    !distributionBasename ||
+    (mode === "strict" && checksumValue && !checksum)
+  ) {
+    throw new Error("Malformed Gradle wrapper properties");
+  }
+  return { gradleVersion, distributionBasename, checksum };
+};
+
+const optionalBoundedRegularFile = (
+  fileSystem: ToolchainFileSystem,
+  filename: string,
+  maximumBytes: number
+): string | null => {
   try {
-    const stats = fs.fstatSync(descriptor);
-    if (!stats.isFile() || stats.size > MAX_WRAPPER_BYTES) {
-      throw new Error("Invalid Gradle wrapper properties");
+    return readBoundedRegularFile(fileSystem, filename, maximumBytes);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+};
+
+const resolveAndroidSdkRoot = (
+  projectRoot: string,
+  env: NodeJS.ProcessEnv,
+  fileSystem: ToolchainFileSystem
+): string => {
+  const androidHome = env.ANDROID_HOME?.trim();
+  const androidSdkRoot = env.ANDROID_SDK_ROOT?.trim();
+  if (
+    androidHome &&
+    androidSdkRoot &&
+    path.resolve(androidHome) !== path.resolve(androidSdkRoot)
+  ) {
+    throw new Error("Conflicting Android SDK roots");
+  }
+  const configured = androidSdkRoot || androidHome;
+  if (configured) return path.resolve(configured);
+
+  const localProperties = optionalBoundedRegularFile(
+    fileSystem,
+    path.join(projectRoot, "android", "local.properties"),
+    MAX_ANDROID_PACKAGE_PROPERTIES_BYTES
+  );
+  const sdkDirectory = localProperties
+    ? parsePropertyFile(localProperties).get("sdk.dir")?.trim()
+    : null;
+  if (!sdkDirectory) throw new Error("Missing Android SDK root");
+  return path.resolve(projectRoot, sdkDirectory.replace(/\\\\/g, "\\"));
+};
+
+const singleMatch = (
+  contents: string,
+  patterns: readonly RegExp[],
+  pattern: RegExp
+): string | null => {
+  const matches = new Set<string>();
+  for (const expression of patterns) {
+    const matcher = new RegExp(
+      expression.source,
+      expression.flags.includes("g") ? expression.flags : `${expression.flags}g`
+    );
+    for (const match of contents.matchAll(matcher)) {
+      const value = match[1];
+      if (!value) continue;
+      const token = boundedToken(value, pattern);
+      if (token) matches.add(token);
     }
-    const contents = fs.readFileSync(descriptor, "utf8");
-    const properties = new Map<string, string>();
-    for (const line of contents.split(/\r?\n/)) {
-      const match = line.match(/^\s*([^#!\s][^=:\s]*)\s*[=:]\s*(.*?)\s*$/);
-      if (match?.[1] && match[2] !== undefined) {
-        properties.set(match[1], match[2].replace(/\\:/g, ":"));
+  }
+  if (matches.size > 1)
+    throw new Error("Ambiguous Android build configuration");
+  return [...matches][0] ?? null;
+};
+
+const discoverAndroidBuildConfiguration = (
+  projectRoot: string,
+  fileSystem: ToolchainFileSystem,
+  moduleResolver: ToolchainModuleResolver
+): { compileSdkVersion: string; buildToolsVersion: string } | null => {
+  const gradleProperties = optionalBoundedRegularFile(
+    fileSystem,
+    path.join(projectRoot, "android", "gradle.properties"),
+    MAX_ANDROID_CONFIGURATION_BYTES
+  );
+  const properties = gradleProperties
+    ? parsePropertyFile(gradleProperties)
+    : new Map<string, string>();
+  let compileSdkVersion = boundedToken(
+    properties.get("android.compileSdkVersion") ?? "",
+    /^[0-9]{1,3}$/
+  );
+  let buildToolsVersion = boundedToken(
+    properties.get("android.buildToolsVersion") ?? "",
+    /^[0-9][0-9A-Za-z.+-]*$/
+  );
+
+  const scripts = ["build.gradle", path.join("app", "build.gradle")]
+    .map((relativePath) =>
+      optionalBoundedRegularFile(
+        fileSystem,
+        path.join(projectRoot, "android", relativePath),
+        MAX_ANDROID_CONFIGURATION_BYTES
+      )
+    )
+    .filter((contents): contents is string => contents !== null)
+    .join("\n");
+  if (!compileSdkVersion || !buildToolsVersion) {
+    compileSdkVersion ??= singleMatch(
+      scripts,
+      [
+        /android\.compileSdkVersion[^\r\n]*?\?:\s*["']([0-9]{1,3})["']/,
+        /\bcompileSdk(?:Version)?\s*(?:=|\s)\s*["']?([0-9]{1,3})["']?/,
+      ],
+      /^[0-9]{1,3}$/
+    );
+    buildToolsVersion ??= singleMatch(
+      scripts,
+      [
+        /android\.buildToolsVersion[^\r\n]*?\?:\s*["']([0-9][0-9A-Za-z.+-]*)["']/,
+        /\bbuildToolsVersion\s*(?:=|\s)\s*["']([0-9][0-9A-Za-z.+-]*)["']/,
+      ],
+      /^[0-9][0-9A-Za-z.+-]*$/
+    );
+  }
+  if (!compileSdkVersion || !buildToolsVersion) {
+    const settings = optionalBoundedRegularFile(
+      fileSystem,
+      path.join(projectRoot, "android", "settings.gradle"),
+      MAX_ANDROID_CONFIGURATION_BYTES
+    );
+    const usesExpoCatalog =
+      settings?.includes("expoAutolinking.useExpoVersionCatalog()") === true &&
+      /apply\s+plugin:\s*["']expo-root-project["']/.test(scripts) &&
+      scripts.includes("rootProject.ext.compileSdkVersion") &&
+      scripts.includes("rootProject.ext.buildToolsVersion");
+    if (usesExpoCatalog) {
+      try {
+        const reactNativePackage = moduleResolver(
+          "react-native/package.json",
+          projectRoot
+        );
+        const catalog = parseTomlVersions(
+          readBoundedRegularFile(
+            fileSystem,
+            path.join(
+              path.dirname(reactNativePackage),
+              "gradle",
+              "libs.versions.toml"
+            ),
+            MAX_ANDROID_CONFIGURATION_BYTES
+          )
+        );
+        compileSdkVersion ??= boundedToken(
+          catalog.get("compileSdk") ?? "",
+          /^[0-9]{1,3}$/
+        );
+        buildToolsVersion ??= boundedToken(
+          catalog.get("buildTools") ?? "",
+          /^[0-9][0-9A-Za-z.+-]*$/
+        );
+      } catch {
+        return null;
       }
     }
-    const distributionUrl = properties.get("distributionUrl") ?? "";
-    const basename = distributionUrl.split(/[\\/]/).pop() ?? "";
-    const gradleVersion = boundedToken(
-      basename.match(/^gradle-([0-9][0-9A-Za-z.+-]*)-(?:bin|all)\.zip$/)?.[1] ??
-        "",
-      /^[0-9A-Za-z.+-]+$/
-    );
-    const distributionBasename = boundedToken(
-      basename,
-      /^gradle-[0-9A-Za-z.+-]+-(?:bin|all)\.zip$/
-    );
-    const checksumValue = properties.get("distributionSha256Sum");
-    const checksum = checksumValue
-      ? boundedToken(checksumValue.toLowerCase(), /^[a-f0-9]{64}$/)
-      : null;
-    if (
-      !gradleVersion ||
-      !distributionBasename ||
-      (mode === "strict" && checksumValue && !checksum)
-    ) {
-      throw new Error("Malformed Gradle wrapper properties");
-    }
-    return { gradleVersion, distributionBasename, checksum };
-  } finally {
-    fs.closeSync(descriptor);
   }
+  if (!compileSdkVersion || !buildToolsVersion) {
+    return null;
+  }
+  return { compileSdkVersion, buildToolsVersion };
+};
+
+const parseTomlVersions = (contents: string): Map<string, string> => {
+  const versions = new Map<string, string>();
+  let inVersions = false;
+  for (const line of contents.split(/\r?\n/)) {
+    const section = line.match(/^\s*\[([^\]]+)]\s*(?:#.*)?$/)?.[1];
+    if (section) {
+      inVersions = section === "versions";
+      continue;
+    }
+    if (!inVersions) continue;
+    const match = line.match(
+      /^\s*([A-Za-z0-9_-]+)\s*=\s*["']([^"']+)["']\s*(?:#.*)?$/
+    );
+    if (match?.[1] && match[2] !== undefined) {
+      if (versions.has(match[1])) {
+        throw new Error("Malformed Expo Android version catalog");
+      }
+      versions.set(match[1], match[2]);
+    }
+  }
+  return versions;
+};
+
+const discoverInstalledAndroidPackages = (
+  projectRoot: string,
+  env: NodeJS.ProcessEnv,
+  fileSystem: ToolchainFileSystem,
+  moduleResolver: ToolchainModuleResolver
+): {
+  compileSdkVersion?: string;
+  androidSdkPlatformRevision?: string;
+  buildToolsVersion?: string;
+} => {
+  const configuration = discoverAndroidBuildConfiguration(
+    projectRoot,
+    fileSystem,
+    moduleResolver
+  );
+  // Expo's root-project plugin commonly supplies these values dynamically.
+  // If neither value is statically knowable, retain the pre-SDK-signal key
+  // shape instead of disabling otherwise-safe Android caching. When the
+  // selected versions are knowable, their installed package metadata becomes
+  // required and is validated below.
+  if (configuration === null) return {};
+  const sdkRoot = resolveAndroidSdkRoot(projectRoot, env, fileSystem);
+  let platformProperties: Map<string, string>;
+  let buildToolsProperties: Map<string, string>;
+  try {
+    platformProperties = parsePropertyFile(
+      readBoundedRegularFile(
+        fileSystem,
+        path.join(
+          sdkRoot,
+          "platforms",
+          `android-${configuration.compileSdkVersion}`,
+          "source.properties"
+        ),
+        MAX_ANDROID_PACKAGE_PROPERTIES_BYTES
+      )
+    );
+    buildToolsProperties = parsePropertyFile(
+      readBoundedRegularFile(
+        fileSystem,
+        path.join(
+          sdkRoot,
+          "build-tools",
+          configuration.buildToolsVersion,
+          "source.properties"
+        ),
+        MAX_ANDROID_PACKAGE_PROPERTIES_BYTES
+      )
+    );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new Error("Missing Android SDK package");
+    }
+    throw error;
+  }
+  const platformApi = boundedToken(
+    platformProperties.get("AndroidVersion.ApiLevel") ?? "",
+    /^[0-9]{1,3}$/
+  );
+  const platformRevision = boundedToken(
+    platformProperties.get("Pkg.Revision") ?? "",
+    /^[0-9][0-9A-Za-z.+-]*$/
+  );
+  const installedBuildToolsVersion = boundedToken(
+    buildToolsProperties.get("Pkg.Revision") ?? "",
+    /^[0-9][0-9A-Za-z.+-]*$/
+  );
+  if (
+    platformApi !== configuration.compileSdkVersion ||
+    !platformRevision ||
+    installedBuildToolsVersion !== configuration.buildToolsVersion
+  ) {
+    throw new Error("Malformed Android SDK package metadata");
+  }
+  return {
+    compileSdkVersion: configuration.compileSdkVersion,
+    androidSdkPlatformRevision: platformRevision,
+    buildToolsVersion: configuration.buildToolsVersion,
+  };
 };
 
 const parseJavaProperties = (text: string) => {
@@ -475,9 +794,17 @@ const discoverAndroid = async (
   mode: ToolchainMode,
   runner: ToolchainCommandRunner,
   env: NodeJS.ProcessEnv,
-  hostArch: HostArchitecture
+  hostArch: HostArchitecture,
+  fileSystem: ToolchainFileSystem,
+  moduleResolver: ToolchainModuleResolver
 ): Promise<AndroidToolchainSnapshot> => {
-  const wrapper = readWrapperProperties(projectRoot, mode);
+  const wrapper = readWrapperProperties(projectRoot, mode, fileSystem);
+  const androidPackages = discoverInstalledAndroidPackages(
+    projectRoot,
+    env,
+    fileSystem,
+    moduleResolver
+  );
   const javaExecutable = env.JAVA_HOME
     ? path.join(env.JAVA_HOME, "bin", "java")
     : "java";
@@ -515,6 +842,7 @@ const discoverAndroid = async (
   return {
     platform: "android",
     hostArch,
+    ...androidPackages,
     javaSpecificationVersion,
     javaVendorFamily: javaVendorFamily(vendor),
     jvmArch,
@@ -539,12 +867,19 @@ const reasonForError = (error: unknown): ToolchainDiscoveryReason => {
   if (message.includes("target ambiguous")) return "target-ambiguous";
   if (message.includes("target selector")) return "invalid-run-profile";
   if (message.includes("Unsupported Android ABI")) return "unsupported-abi";
+  if (message.startsWith("Missing Android SDK")) return "missing-sdk";
   if (
     message.includes("wrapper") ||
     (error as NodeJS.ErrnoException)?.code === "ENOENT"
   )
     return "missing-wrapper";
-  if (message.includes("Malformed") || message.includes("Invalid"))
+  if (
+    message.includes("Malformed") ||
+    message.includes("Invalid") ||
+    message.includes("Conflicting") ||
+    message.includes("build configuration") ||
+    message.includes("bounded toolchain file")
+  )
     return "malformed-output";
   return "command-failed";
 };
@@ -555,6 +890,8 @@ export const discoverToolchain = async ({
   runOptions,
   mode,
   runner = runToolchainCommand,
+  fileSystem = nodeFileSystem,
+  moduleResolver = resolveProjectModule,
   env = process.env,
   hostArch = process.arch,
 }: ToolchainDiscoveryRequest): Promise<ToolchainDiscoveryResult> => {
@@ -580,7 +917,9 @@ export const discoverToolchain = async ({
             mode,
             runner,
             env,
-            normalizedHostArch
+            normalizedHostArch,
+            fileSystem,
+            moduleResolver
           );
     const snapshot = await Promise.race([
       discovery,

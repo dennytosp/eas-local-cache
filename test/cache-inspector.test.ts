@@ -15,7 +15,7 @@ import {
   getEntryId,
   getRestoreDirectory,
 } from "../src/cache/paths";
-import { readManifest } from "../src/cache/manifest";
+import { readManifest, writeManifest } from "../src/cache/manifest";
 import {
   resolveCacheEntryDetailed,
   uploadCacheEntry,
@@ -150,6 +150,92 @@ describe("cache catalog and cleanup", () => {
     expect(result.limitsSatisfied).toBe(true);
     expect(fs.existsSync(invalidDirectory)).toBe(false);
     expect(fs.existsSync(valid.artifact)).toBe(true);
+  });
+
+  it("accounts for and prunes abandoned LAN transfer staging", async () => {
+    const seeded = await seedEntry(
+      "transfer-staging",
+      "valid",
+      "2026-08-12T00:00:00.000Z"
+    );
+    const abandoned = path.join(
+      seeded.paths.transferStagingRoot,
+      `${"a".repeat(64)}-abandoned`
+    );
+    fs.mkdirSync(abandoned, { recursive: true });
+    fs.writeFileSync(path.join(abandoned, "partial.wire"), "x".repeat(512));
+    const old = new Date("2026-08-01T00:00:00.000Z");
+    fs.utimesSync(abandoned, old, old);
+
+    const before = inventoryCache(projectRoot);
+    expect(before.usage.stagingBytes).toBeGreaterThanOrEqual(512);
+    expect(before.usage.otherBytes).toBe(0);
+
+    const result = await pruneCache(
+      projectRoot,
+      { ...unlimitedPolicy, retentionMs: 24 * 60 * 60 * 1000 },
+      { now: new Date("2026-08-13T00:00:00.000Z") }
+    );
+    expect(result.auxiliaryRemoved).toContainEqual(
+      expect.objectContaining({
+        path: abandoned,
+        category: "transfer-staging",
+      })
+    );
+    expect(fs.existsSync(abandoned)).toBe(false);
+  });
+
+  it("does not prune LAN transfer staging owned by an active transfer", async () => {
+    const seeded = await seedEntry(
+      "active-transfer-staging",
+      "valid",
+      "2026-08-12T00:00:00.000Z"
+    );
+    const entryId = "b".repeat(64);
+    fs.mkdirSync(seeded.paths.transferLocksRoot, { recursive: true });
+    const transferLock = await acquireEntryLock(
+      seeded.paths.transferLocksRoot,
+      entryId
+    );
+    expect(transferLock).not.toBeNull();
+    const active = path.join(
+      seeded.paths.transferStagingRoot,
+      `${entryId}-active`
+    );
+    fs.mkdirSync(active, { recursive: true });
+    fs.writeFileSync(path.join(active, "partial.wire"), "active-transfer");
+    const activeBody = path.join(
+      seeded.paths.transferStagingRoot,
+      `${entryId}-.wire-body-test`
+    );
+    fs.writeFileSync(activeBody, "active-ios-app-tree");
+    const old = new Date("2026-08-01T00:00:00.000Z");
+    fs.utimesSync(active, old, old);
+    fs.utimesSync(activeBody, old, old);
+
+    try {
+      const result = await pruneCache(
+        projectRoot,
+        { ...unlimitedPolicy, retentionMs: 24 * 60 * 60 * 1000 },
+        { now: new Date("2026-08-13T00:00:00.000Z") }
+      );
+      expect(result.auxiliaryRemoved).not.toContainEqual(
+        expect.objectContaining({ path: active })
+      );
+      expect(result.auxiliaryRemoved).not.toContainEqual(
+        expect.objectContaining({ path: activeBody })
+      );
+      expect(result.skipped).toContainEqual(
+        expect.objectContaining({
+          entryId,
+          reason: expect.stringContaining("active writer"),
+        })
+      );
+      expect(fs.existsSync(active)).toBe(true);
+      expect(fs.existsSync(activeBody)).toBe(true);
+    } finally {
+      if (transferLock) releaseEntryLock(transferLock);
+    }
   });
 
   it("accounts for and removes unexpected platform storage", async () => {
@@ -642,6 +728,26 @@ describe("doctor and CLI", () => {
     expect(fs.existsSync(entry.artifact)).toBe(true);
   });
 
+  it("reports malformed trusted LAN state without contacting peers", async () => {
+    const entry = await seedEntry(
+      "doctor-lan-state",
+      "healthy",
+      "2026-08-12T00:00:00.000Z"
+    );
+    fs.mkdirSync(entry.paths.stateRoot, { mode: 0o700 });
+    fs.writeFileSync(path.join(entry.paths.stateRoot, "lan.json"), "{", {
+      mode: 0o600,
+    });
+
+    const report = doctorCache(projectRoot);
+
+    expect(report.healthy).toBe(false);
+    expect(report.issues).toContainEqual(
+      expect.objectContaining({ code: "invalid-lan-state" })
+    );
+    expect(fs.existsSync(entry.artifact)).toBe(true);
+  });
+
   it("validates existing restore integrity without mutating it", async () => {
     if (!discoverZstdCodec()) return;
     const seeded = await seedCompressedEntry("doctor-restore");
@@ -758,6 +864,10 @@ describe("doctor and CLI", () => {
       const parsed = JSON.parse(output) as Record<string, unknown>;
       if (command === "stats") {
         expect(parsed.entryCount).toBe(1);
+        expect(parsed.latestBuild).toMatchObject({
+          platform: "android",
+          fingerprint: "cli",
+        });
         expect(parsed.hitRate).toBeNull();
         expect(parsed.estimatedTimeSavedMs).toBeNull();
       } else {
@@ -765,6 +875,88 @@ describe("doctor and CLI", () => {
         expect(parsed.legacyEntries).toEqual([]);
       }
     }
+  });
+
+  it("reports the latest build and lists entries newest-first with deterministic ties", async () => {
+    const oldest = await seedEntry(
+      "oldest",
+      "oldest",
+      "2026-08-13T04:00:00.000Z"
+    );
+    const tiedA = await seedEntry(
+      "tied-a",
+      "tied-a",
+      "2026-08-13T03:00:00.000Z"
+    );
+    const tiedB = await seedEntry(
+      "tied-b",
+      "tied-b",
+      "2026-08-13T02:00:00.000Z"
+    );
+    const createdAt = new Map([
+      [oldest.entryId, "2026-08-11T00:00:00.000Z"],
+      [tiedA.entryId, "2026-08-12T00:00:00.000Z"],
+      [tiedB.entryId, "2026-08-12T00:00:00.000Z"],
+    ]);
+    for (const [entryId, timestamp] of createdAt) {
+      const entryDirectory = path.join(
+        oldest.paths.entriesRoot,
+        "android",
+        entryId
+      );
+      writeManifest(entryDirectory, {
+        ...readManifest(entryDirectory),
+        createdAt: timestamp,
+      });
+    }
+
+    const readJson = async (command: "stats" | "list") => {
+      let output = "";
+      const write = spyOn(process.stdout, "write").mockImplementation(((
+        chunk: string | Uint8Array
+      ) => {
+        output += chunk.toString();
+        return true;
+      }) as typeof process.stdout.write);
+      expect(
+        await runCli([command, "--project-root", projectRoot, "--json"])
+      ).toBe(0);
+      write.mockRestore();
+      return JSON.parse(output) as {
+        latestBuild: { entryId: string; createdAt: string };
+        entries: Array<{ entryId: string; createdAt: string }>;
+      };
+    };
+
+    const expectedTies = [tiedA.entryId, tiedB.entryId].sort();
+    const list = await readJson("list");
+    expect(list.entries.map((entry) => entry.entryId)).toEqual([
+      ...expectedTies,
+      oldest.entryId,
+    ]);
+    const stats = await readJson("stats");
+    const expectedFingerprint =
+      expectedTies[0] === tiedA.entryId ? "tied-a" : "tied-b";
+    expect(stats.latestBuild).toMatchObject({
+      entryId: expectedTies[0],
+      createdAt: "2026-08-12T00:00:00.000Z",
+    });
+
+    const log = spyOn(console, "log").mockImplementation(() => {});
+    expect(await runCli(["stats", "--project-root", projectRoot])).toBe(0);
+    expect(log).toHaveBeenCalledWith(
+      `Latest build: android ${expectedFingerprint} created 2026-08-12T00:00:00.000Z`
+    );
+    log.mockRestore();
+  });
+
+  it("prints an explicit unavailable latest build for an empty cache", async () => {
+    const log = spyOn(console, "log").mockImplementation(() => {});
+    expect(await runCli(["stats", "--project-root", projectRoot])).toBe(0);
+    expect(log).toHaveBeenCalledWith(
+      "Latest build: unavailable (no versioned cache entries)"
+    );
+    log.mockRestore();
   });
 
   it("reports exact compression and restore storage in stats and list JSON", async () => {

@@ -406,6 +406,63 @@ describe("insight persistence", () => {
       expect(() => readInsight(root)).toThrow("malformed");
     }
   });
+
+  it("accepts complete Android SDK signals while retaining legacy schema-2 insight compatibility", () => {
+    const effectiveHash = `elc-env-v1:${"f".repeat(64)}`;
+    const legacy = createCacheInsight(
+      snapshot([], {
+        platform: "android",
+        runProfile: { variant: "debug", allArch: true },
+        fingerprintHash: effectiveHash,
+        baseFingerprintHash: "expo-base-hash",
+        effectiveFingerprintHash: effectiveHash,
+        keySchema: "environment-v1",
+        toolchainMode: "safe",
+        toolchain: {
+          platform: "android",
+          hostArch: "arm64",
+          javaSpecificationVersion: "21",
+          javaVendorFamily: "adoptium",
+          jvmArch: "arm64",
+          gradleVersion: "8.14.3",
+          targetArchitecture: "all",
+        },
+        environmentKeyDigest: null,
+      }),
+      "1".repeat(64)
+    );
+    const current = {
+      ...legacy,
+      toolchain: {
+        ...legacy.toolchain,
+        compileSdkVersion: "35",
+        androidSdkPlatformRevision: "2",
+        buildToolsVersion: "35.0.0",
+      },
+    };
+
+    for (const valid of [legacy, current]) {
+      const root = makeRoot();
+      fs.writeFileSync(
+        path.join(root, INSIGHT_FILENAME),
+        JSON.stringify(valid)
+      );
+      expect(JSON.stringify(readInsight(root))).toBe(JSON.stringify(valid));
+    }
+
+    for (const toolchain of [
+      { ...current.toolchain, buildToolsVersion: undefined },
+      { ...current.toolchain, compileSdkVersion: "android-35" },
+      { ...current.toolchain, androidSdkPlatformRevision: "/private/sdk" },
+    ]) {
+      const root = makeRoot();
+      fs.writeFileSync(
+        path.join(root, INSIGHT_FILENAME),
+        JSON.stringify({ ...current, toolchain })
+      );
+      expect(() => readInsight(root)).toThrow("malformed");
+    }
+  });
 });
 
 describe("insight diffing and candidate ranking", () => {

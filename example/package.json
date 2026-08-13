@@ -14,6 +14,8 @@
     "cache:test:environment:android": "bash ./scripts/test-cache-environment.sh android",
     "cache:test:compression:ios": "bash ./scripts/test-cache-compression.sh ios",
     "cache:test:compression:android": "bash ./scripts/test-cache-compression.sh android",
+    "cache:test:lan:ios": "bash ./scripts/test-cache-lan.sh ios",
+    "cache:test:lan:android": "bash ./scripts/test-cache-lan.sh android",
     "cache:stats": "node ../build/cli-bin.js stats --project-root .",
     "cache:list": "node ../build/cli-bin.js list --project-root .",
     "cache:doctor": "node ../build/cli-bin.js doctor --project-root .",

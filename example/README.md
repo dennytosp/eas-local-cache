@@ -40,6 +40,8 @@ The verification checks the integration points:
   without editing tracked or native files.
 - A conditional `EAS_LOCAL_CACHE_TEST_COMPRESSION=zstd` enables the compression
   oracle while normal example builds retain the package default.
+- A conditional `EAS_LOCAL_CACHE_TEST_LAN=read|read-write` enables the trusted
+  LAN oracle while ordinary example builds remain local-only.
 
 ## Test a real cache round trip
 
@@ -185,3 +187,23 @@ the provider logs the reason and stores the successful artifact uncompressed.
 If a previously compressed entry cannot be decoded, the lookup becomes a miss
 so Expo can rebuild and replace it. Corrupt compressed payloads are quarantined
 rather than returned to Expo.
+
+## Test trusted LAN sharing
+
+The LAN oracle uses a temporary loopback peer with a one-use pairing file. It
+runs one native local miss, moves only that new entry into the temporary peer,
+and removes the local copy. The second identical build must fetch, authenticate,
+verify, and atomically promote that entry. After the server stops, a third build
+must hit the promoted local entry without network access:
+
+```bash
+# Build-only iOS run; use a Simulator UDID to install and launch instead.
+EAS_LOCAL_CACHE_TEST_DEVICE=generic bun run cache:test:lan:ios
+
+# Or start an Android emulator first.
+bun run cache:test:lan:android
+```
+
+The script preserves any existing local LAN trust state, checks the exact
+miss/hit telemetry delta, scans diagnostics for the non-secret test token, and
+requires `doctor` to finish healthy.

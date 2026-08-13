@@ -20,7 +20,8 @@ export const validateEntry = (
   providerRoot: string,
   platform: CachePlatform,
   fingerprintHash: string,
-  entryId: string
+  entryId: string,
+  options: { deadlineMs?: number } = {}
 ): CacheValidationResult => {
   try {
     assertManagedDirectory(providerRoot, entryDirectory);
@@ -49,7 +50,8 @@ export const validateEntry = (
       }
       const payload = inspectPayloadFile(
         payloadPath,
-        manifest.payload.sizeBytes
+        manifest.payload.sizeBytes,
+        options
       );
       if (
         payload.sizeBytes !== manifest.payload.sizeBytes ||
@@ -68,10 +70,15 @@ export const validateEntry = (
       return { valid: false, reason: "artifact path escapes the entry" };
     }
 
-    const integrity = inspectArtifact(artifactPath, platform, {
-      sizeBytes: manifest.artifact.sizeBytes,
-      fileCount: manifest.artifact.fileCount,
-    });
+    const integrity = inspectArtifact(
+      artifactPath,
+      platform,
+      {
+        sizeBytes: manifest.artifact.sizeBytes,
+        fileCount: manifest.artifact.fileCount,
+      },
+      options
+    );
     if (
       integrity.algorithm !== manifest.artifact.integrity.algorithm ||
       integrity.digest !== manifest.artifact.integrity.digest ||

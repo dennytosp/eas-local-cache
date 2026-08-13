@@ -1,6 +1,8 @@
 import * as fs from "fs";
 import * as path from "path";
 
+import { readLanState } from "../lan/state";
+import { validateServerIdentity } from "../lan/certificate";
 import { extractAppTree } from "./app-tree";
 import { checkAvailableSpace, getCompressionCapacity } from "./capacity";
 import { inventoryCache, type CatalogIssue } from "./catalog";
@@ -79,6 +81,26 @@ const validateExistingRestore = (
 export const doctorCache = (projectRoot: string): DoctorReport => {
   const catalog = inventoryCache(projectRoot);
   const issues = [...catalog.issues];
+
+  if (pathExists(path.join(catalog.paths.stateRoot, "lan.json"))) {
+    try {
+      const lanState = readLanState(catalog.paths.providerRoot);
+      if (!lanState) {
+        throw new Error("LAN state disappeared during validation");
+      }
+      if (lanState.serverIdentity) {
+        validateServerIdentity(lanState.serverIdentity);
+      }
+    } catch (error) {
+      issues.push({
+        code: "invalid-lan-state",
+        path: path.join(catalog.paths.stateRoot, "lan.json"),
+        message:
+          error instanceof Error ? error.message : "LAN state is invalid",
+        severity: "error",
+      });
+    }
+  }
 
   for (const entry of catalog.entries) {
     const validation = validateEntry(

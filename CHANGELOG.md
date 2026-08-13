@@ -39,6 +39,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a decoder or sufficient temporary disk space is unavailable.
 - Compression accounting in Cache Inspector list and stats output, plus restore
   awareness in automatic and manual cleanup.
+- Opt-in trusted LAN sharing with pinned TLS, explicit one-use pairing,
+  per-peer authentication and revocation, and checksum-verified atomic local
+  promotion.
 
 ### Changed
 

@@ -192,7 +192,17 @@ const writeRecordHeader = (
   return header.length;
 };
 
-const collectSourceRecords = (sourceRoot: string): SourceRecord[] => {
+const assertDeadline = (deadlineMs?: number): void => {
+  if (deadlineMs !== undefined && Date.now() >= deadlineMs) {
+    throw new Error("App-tree encoding exceeded its deadline");
+  }
+};
+
+const collectSourceRecords = (
+  sourceRoot: string,
+  deadlineMs?: number
+): SourceRecord[] => {
+  assertDeadline(deadlineMs);
   const rootStats = fs.lstatSync(sourceRoot);
   if (rootStats.isSymbolicLink() || !rootStats.isDirectory()) {
     throw new Error("App-tree source root must be a real directory");
@@ -204,8 +214,10 @@ const collectSourceRecords = (sourceRoot: string): SourceRecord[] => {
     absoluteDirectory: string,
     relativeDirectory: string
   ): void => {
+    assertDeadline(deadlineMs);
     const names = fs.readdirSync(absoluteDirectory, { encoding: "buffer" });
     for (const nameBytes of names) {
+      assertDeadline(deadlineMs);
       const name = decodeUtf8(nameBytes, "App-tree source name");
       const relativePath = relativeDirectory
         ? `${relativeDirectory}/${name}`
@@ -234,9 +246,10 @@ const collectSourceRecords = (sourceRoot: string): SourceRecord[] => {
     }
   };
   visit(sourceRoot, "");
-  records.sort((left, right) =>
-    Buffer.compare(left.pathBytes, right.pathBytes)
-  );
+  records.sort((left, right) => {
+    assertDeadline(deadlineMs);
+    return Buffer.compare(left.pathBytes, right.pathBytes);
+  });
   const aliases = new Map<string, string>();
   for (let index = 1; index < records.length; index += 1) {
     if (
@@ -249,6 +262,7 @@ const collectSourceRecords = (sourceRoot: string): SourceRecord[] => {
     }
   }
   for (const record of records) {
+    assertDeadline(deadlineMs);
     const aliasKey = filesystemAliasKey(record.path);
     const aliasedPath = aliases.get(aliasKey);
     if (aliasedPath !== undefined && aliasedPath !== record.path) {
@@ -267,12 +281,14 @@ const openNoFollow = (
 
 export const encodeAppTree = async (
   sourceRoot: string,
-  archivePath: string
+  archivePath: string,
+  options: { deadlineMs?: number } = {}
 ): Promise<AppTreeArchiveStats> => {
-  const records = collectSourceRecords(sourceRoot);
+  const records = collectSourceRecords(sourceRoot, options.deadlineMs);
   let sizeBytes = 0;
   let fileCount = 0;
   for (const record of records) {
+    assertDeadline(options.deadlineMs);
     if (record.stats.isFile()) {
       checkedInteger(
         record.stats.size,
@@ -303,6 +319,7 @@ export const encodeAppTree = async (
     writeAll(descriptor, MAGIC);
     archiveBytes += MAGIC.length;
     for (const record of records) {
+      assertDeadline(options.deadlineMs);
       const mode = record.stats.mode & 0o7777;
       if (record.stats.isDirectory()) {
         if (
@@ -391,6 +408,7 @@ export const encodeAppTree = async (
         const buffer = Buffer.allocUnsafe(IO_BUFFER_BYTES);
         let remaining = record.stats.size;
         while (remaining > 0) {
+          assertDeadline(options.deadlineMs);
           const read = fs.readSync(
             input,
             buffer,
@@ -416,6 +434,7 @@ export const encodeAppTree = async (
       }
     }
     writeAll(descriptor, Buffer.from([END]));
+    assertDeadline(options.deadlineMs);
     archiveBytes += 1;
     if (archiveBytes > archiveBound) {
       throw new Error("App-tree archive exceeds its metadata allowance");
@@ -435,13 +454,20 @@ export const encodeAppTree = async (
 class ArchiveReader {
   private offset = 0;
 
-  constructor(private readonly descriptor: number, readonly size: number) {}
+  constructor(
+    private readonly descriptor: number,
+    readonly size: number,
+    private readonly deadlineMs?: number
+  ) {}
 
   get bytesRead(): number {
     return this.offset;
   }
 
   read(length: number): Buffer {
+    if (this.deadlineMs !== undefined && Date.now() >= this.deadlineMs) {
+      throw new Error("App-tree extraction exceeded its deadline");
+    }
     if (
       !Number.isSafeInteger(length) ||
       length < 0 ||
@@ -452,6 +478,9 @@ class ArchiveReader {
     const result = Buffer.allocUnsafe(length);
     let written = 0;
     while (written < length) {
+      if (this.deadlineMs !== undefined && Date.now() >= this.deadlineMs) {
+        throw new Error("App-tree extraction exceeded its deadline");
+      }
       const count = fs.readSync(
         this.descriptor,
         result,
@@ -476,7 +505,13 @@ class ArchiveReader {
   }
 }
 
-const prepareDestination = (destinationRoot: string): void => {
+const prepareDestination = (
+  destinationRoot: string,
+  deadlineMs?: number
+): void => {
+  if (deadlineMs !== undefined && Date.now() >= deadlineMs) {
+    throw new Error("App-tree extraction exceeded its deadline");
+  }
   try {
     const stats = fs.lstatSync(destinationRoot);
     if (
@@ -496,7 +531,8 @@ const prepareDestination = (destinationRoot: string): void => {
 
 const validateParentDirectories = (
   destinationRoot: string,
-  relativePath: string
+  relativePath: string,
+  deadlineMs?: number
 ): string => {
   let current = destinationRoot;
   const rootStats = fs.lstatSync(current);
@@ -505,6 +541,9 @@ const validateParentDirectories = (
   }
   const segments = relativePath.split("/");
   for (const segment of segments.slice(0, -1)) {
+    if (deadlineMs !== undefined && Date.now() >= deadlineMs) {
+      throw new Error("App-tree extraction exceeded its deadline");
+    }
     current = path.join(current, segment);
     const stats = fs.lstatSync(current);
     if (stats.isSymbolicLink() || !stats.isDirectory()) {
@@ -533,8 +572,15 @@ const applyDirectoryMode = (directoryPath: string, mode: number): void => {
 export const extractAppTree = async (
   archivePath: string,
   destinationRoot: string,
-  declarations: AppTreeDeclarations
+  declarations: AppTreeDeclarations,
+  options: { deadlineMs?: number } = {}
 ): Promise<AppTreeArchiveStats> => {
+  const assertExtractionDeadline = (): void => {
+    if (options.deadlineMs !== undefined && Date.now() >= options.deadlineMs) {
+      throw new Error("App-tree extraction exceeded its deadline");
+    }
+  };
+  assertExtractionDeadline();
   const sizeBytes = checkedInteger(
     declarations.sizeBytes,
     "Declared logical size",
@@ -565,11 +611,15 @@ export const extractAppTree = async (
     ) {
       throw new Error("App-tree archive is not a bounded regular file");
     }
-    const reader = new ArchiveReader(descriptor, archiveStats.size);
+    const reader = new ArchiveReader(
+      descriptor,
+      archiveStats.size,
+      options.deadlineMs
+    );
     if (!reader.read(MAGIC.length).equals(MAGIC)) {
       throw new Error("App-tree archive has invalid magic");
     }
-    prepareDestination(destinationRoot);
+    prepareDestination(destinationRoot, options.deadlineMs);
 
     let previousPath: Buffer | null = null;
     let decodedSize = 0;
@@ -584,6 +634,7 @@ export const extractAppTree = async (
     }> = [];
 
     while (true) {
+      assertExtractionDeadline();
       const type = reader.read(1).readUInt8(0);
       if (type === END) {
         if (reader.bytesRead !== reader.size) {
@@ -656,7 +707,8 @@ export const extractAppTree = async (
 
       const outputPath = validateParentDirectories(
         destinationRoot,
-        relativePath
+        relativePath,
+        options.deadlineMs
       );
       if (type === DIRECTORY) {
         fs.mkdirSync(outputPath, { mode: 0o700 });
@@ -707,14 +759,22 @@ export const extractAppTree = async (
     if (decodedSize !== sizeBytes || decodedFiles !== fileCount) {
       throw new Error("App-tree archive does not match its exact declarations");
     }
-    directoryModes.sort(
-      (left, right) =>
+    directoryModes.sort((left, right) => {
+      assertExtractionDeadline();
+      return (
         right.path.split(path.sep).length - left.path.split(path.sep).length
-    );
+      );
+    });
     for (const directory of directoryModes) {
-      validateParentDirectories(destinationRoot, directory.relativePath);
+      assertExtractionDeadline();
+      validateParentDirectories(
+        destinationRoot,
+        directory.relativePath,
+        options.deadlineMs
+      );
       applyDirectoryMode(directory.path, directory.mode);
     }
+    assertExtractionDeadline();
     return {
       archiveBytes: archiveStats.size,
       sizeBytes: decodedSize,

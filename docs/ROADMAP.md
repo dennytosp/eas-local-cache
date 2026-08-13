@@ -52,6 +52,8 @@ Status: implemented on `feat/compressed-cache-storage`.
 
 ## Milestone 6: Trusted LAN Cache
 
+Status: implemented on `feat/trusted-lan-cache`.
+
 - Opt-in `serve` and `pair` workflow instead of ambient peer trust
 - Authenticated peer discovery and transfer
 - Manifest and checksum verification before local promotion

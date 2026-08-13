@@ -73,6 +73,9 @@ export type IosToolchainSnapshot = {
 export type AndroidToolchainSnapshot = {
   platform: "android";
   hostArch: string;
+  compileSdkVersion?: string;
+  androidSdkPlatformRevision?: string;
+  buildToolsVersion?: string;
   javaSpecificationVersion: string;
   javaVendorFamily: string;
   jvmArch: string;
@@ -613,6 +616,9 @@ const isAndroidToolchainSnapshot = (
   hasOnlyKeys(value, [
     "platform",
     "hostArch",
+    "compileSdkVersion",
+    "androidSdkPlatformRevision",
+    "buildToolsVersion",
     "javaSpecificationVersion",
     "javaVendorFamily",
     "jvmArch",
@@ -625,6 +631,13 @@ const isAndroidToolchainSnapshot = (
   ]) &&
   value.platform === "android" &&
   isEnumValue(HOST_ARCHITECTURES, value.hostArch) &&
+  ((value.compileSdkVersion === undefined &&
+    value.androidSdkPlatformRevision === undefined &&
+    value.buildToolsVersion === undefined) ||
+    (isToolchainValue(value.compileSdkVersion) &&
+      /^[0-9]{1,3}$/.test(value.compileSdkVersion) &&
+      isToolchainValue(value.androidSdkPlatformRevision) &&
+      isToolchainValue(value.buildToolsVersion))) &&
   isToolchainValue(value.javaSpecificationVersion) &&
   isEnumValue(JAVA_VENDOR_FAMILIES, value.javaVendorFamily) &&
   isEnumValue(HOST_ARCHITECTURES, value.jvmArch) &&
@@ -1063,7 +1076,13 @@ const environmentCategoryForField = (
 ): EnvironmentEvidenceCategory => {
   if (field.startsWith("runProfile.")) return "build-profile";
   if (field === "xcodeBuildVersion" || field === "xcodeVersion") return "xcode";
-  if (field === "simulatorSdkBuildVersion" || field === "simulatorSdkVersion")
+  if (
+    field === "simulatorSdkBuildVersion" ||
+    field === "simulatorSdkVersion" ||
+    field === "compileSdkVersion" ||
+    field === "androidSdkPlatformRevision" ||
+    field === "buildToolsVersion"
+  )
     return "platform-sdk";
   if (
     field === "javaSpecificationVersion" ||

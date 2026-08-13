@@ -16,6 +16,8 @@ export type CachePaths = {
   trashRoot: string;
   restoresRoot: string;
   restoreStagingRoot: string;
+  transferStagingRoot: string;
+  transferLocksRoot: string;
 };
 
 export const getCachePaths = (projectRoot: string): CachePaths => {
@@ -35,6 +37,8 @@ export const getCachePaths = (projectRoot: string): CachePaths => {
     trashRoot: path.join(providerRoot, "trash"),
     restoresRoot: path.join(providerRoot, "restores"),
     restoreStagingRoot: path.join(providerRoot, "restores", "staging"),
+    transferStagingRoot: path.join(providerRoot, "transfer-staging"),
+    transferLocksRoot: path.join(providerRoot, "transfer-locks"),
   };
 };
 

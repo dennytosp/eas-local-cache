@@ -39,7 +39,8 @@
         "retentionDays": 14,
         "autoPrune": true,
         "toolchain": "safe",
-        "compression": "off"
+        "compression": "off",
+        "lan": "off"
       }
     },
     "experiments": {

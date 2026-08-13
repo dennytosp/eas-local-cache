@@ -7,6 +7,7 @@ import {
   discoverToolchain,
   type ToolchainCommandRequest,
   type ToolchainCommandRunner,
+  type ToolchainFileSystem,
 } from "../src/cache/toolchain";
 
 const roots: string[] = [];
@@ -26,6 +27,34 @@ const makeAndroidProject = (checksum?: string) => {
       "distributionUrl=https\\://services.gradle.org/distributions/gradle-8.13-bin.zip",
       ...(checksum ? [`distributionSha256Sum=${checksum}`] : []),
     ].join("\n")
+  );
+  fs.writeFileSync(
+    path.join(projectRoot, "android", "build.gradle"),
+    [
+      "ext {",
+      "  compileSdkVersion = Integer.parseInt(findProperty('android.compileSdkVersion') ?: '35')",
+      "  buildToolsVersion = findProperty('android.buildToolsVersion') ?: '35.0.0'",
+      "}",
+    ].join("\n")
+  );
+  const sdkRoot = path.join(projectRoot, "android-sdk");
+  fs.mkdirSync(path.join(sdkRoot, "platforms", "android-35"), {
+    recursive: true,
+  });
+  fs.mkdirSync(path.join(sdkRoot, "build-tools", "35.0.0"), {
+    recursive: true,
+  });
+  fs.writeFileSync(
+    path.join(sdkRoot, "platforms", "android-35", "source.properties"),
+    "Pkg.Revision=2\nAndroidVersion.ApiLevel=35\n"
+  );
+  fs.writeFileSync(
+    path.join(sdkRoot, "build-tools", "35.0.0", "source.properties"),
+    "Pkg.Revision=35.0.0\n"
+  );
+  fs.writeFileSync(
+    path.join(projectRoot, "android", "local.properties"),
+    `sdk.dir=${sdkRoot}\n`
   );
   return projectRoot;
 };
@@ -163,6 +192,35 @@ const javaOutput = [
 ].join("\n");
 
 describe("Android toolchain discovery", () => {
+  it("discovers the generated Expo example's selected installed SDK tuple", async () => {
+    const exampleRoot = path.resolve(import.meta.dir, "..", "example");
+    if (!fs.existsSync(path.join(exampleRoot, "android", "settings.gradle"))) {
+      return;
+    }
+    const result = await discoverToolchain({
+      projectRoot: exampleRoot,
+      platform: "android",
+      runOptions: { allArch: true },
+      mode: "safe",
+      runner: fixtureRunner((request) => {
+        if (request.command.endsWith("java")) return { stderr: javaOutput };
+        throw new Error("ADB must not run for all-architecture builds");
+      }),
+      env: process.env,
+      hostArch: process.arch,
+    });
+
+    expect(result).toMatchObject({
+      status: "available",
+      snapshot: {
+        platform: "android",
+        compileSdkVersion: "36",
+        buildToolsVersion: "36.0.0",
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain(exampleRoot);
+  });
+
   it("correlates an exact target and chooses the first supported ordered ABI", async () => {
     const projectRoot = makeAndroidProject();
     const commands: string[][] = [];
@@ -186,7 +244,7 @@ describe("Android toolchain discovery", () => {
       hostArch: "x64",
       env: {
         JAVA_HOME: "/secret/jdk",
-        ANDROID_SDK_ROOT: "/secret/android-sdk",
+        ANDROID_SDK_ROOT: path.join(projectRoot, "android-sdk"),
       },
     });
 
@@ -195,6 +253,9 @@ describe("Android toolchain discovery", () => {
       snapshot: {
         platform: "android",
         hostArch: "x86_64",
+        compileSdkVersion: "35",
+        androidSdkPlatformRevision: "2",
+        buildToolsVersion: "35.0.0",
         javaSpecificationVersion: "21",
         javaVendorFamily: "adoptium",
         jvmArch: "arm64",
@@ -205,6 +266,305 @@ describe("Android toolchain discovery", () => {
     expect(commands.some((item) => item.includes("gradlew"))).toBe(false);
     expect(JSON.stringify(result)).not.toContain("SERIAL-ONE");
     expect(JSON.stringify(result)).not.toContain("/secret");
+  });
+
+  it("reads selected installed SDK packages through the injected filesystem without persisting paths", async () => {
+    const projectRoot = makeAndroidProject();
+    const sdkRoot = path.join(projectRoot, "android-sdk");
+    const opened: string[] = [];
+    const fileSystem: ToolchainFileSystem = {
+      openSync(filename, flags) {
+        opened.push(filename);
+        return fs.openSync(filename, flags);
+      },
+      fstatSync: (descriptor) => fs.fstatSync(descriptor),
+      readFileSync: (descriptor, encoding) =>
+        fs.readFileSync(descriptor, encoding),
+      closeSync: (descriptor) => fs.closeSync(descriptor),
+    };
+    const result = await discoverToolchain({
+      projectRoot,
+      platform: "android",
+      runOptions: { allArch: true },
+      mode: "safe",
+      fileSystem,
+      runner: fixtureRunner((request) => {
+        if (request.command.endsWith("java")) return { stderr: javaOutput };
+        throw new Error("ADB must not run for all-architecture builds");
+      }),
+      env: { ANDROID_HOME: sdkRoot },
+      hostArch: "arm64",
+    });
+
+    expect(result).toMatchObject({
+      status: "available",
+      snapshot: {
+        compileSdkVersion: "35",
+        androidSdkPlatformRevision: "2",
+        buildToolsVersion: "35.0.0",
+      },
+    });
+    expect(opened).toContain(
+      path.join(sdkRoot, "platforms", "android-35", "source.properties")
+    );
+    expect(opened).toContain(
+      path.join(sdkRoot, "build-tools", "35.0.0", "source.properties")
+    );
+    expect(JSON.stringify(result)).not.toContain(sdkRoot);
+  });
+
+  it("keeps default safe caching available for Expo root-project SDK values", async () => {
+    const projectRoot = makeAndroidProject();
+    fs.writeFileSync(
+      path.join(projectRoot, "android", "build.gradle"),
+      [
+        'apply plugin: "expo-root-project"',
+        'apply plugin: "com.facebook.react.rootproject"',
+      ].join("\n")
+    );
+    fs.writeFileSync(
+      path.join(projectRoot, "android", "settings.gradle"),
+      [
+        'plugins { id("expo-autolinking-settings") }',
+        "expoAutolinking.useExpoModules()",
+        "expoAutolinking.useExpoVersionCatalog()",
+      ].join("\n")
+    );
+    fs.mkdirSync(path.join(projectRoot, "android", "app"), {
+      recursive: true,
+    });
+    fs.writeFileSync(
+      path.join(projectRoot, "android", "app", "build.gradle"),
+      [
+        "android {",
+        "  buildToolsVersion rootProject.ext.buildToolsVersion",
+        "  compileSdk rootProject.ext.compileSdkVersion",
+        "}",
+      ].join("\n")
+    );
+    const reactNativeRoot = path.join(projectRoot, "react-native-fixture");
+    fs.mkdirSync(path.join(reactNativeRoot, "gradle"), { recursive: true });
+    const reactNativePackage = path.join(reactNativeRoot, "package.json");
+    fs.writeFileSync(reactNativePackage, '{"name":"react-native"}\n');
+    fs.writeFileSync(
+      path.join(reactNativeRoot, "gradle", "libs.versions.toml"),
+      [
+        "[versions]",
+        'compileSdk = "35"',
+        'buildTools = "35.0.0"',
+        "[libraries]",
+        'ignored = { module = "example:ignored" }',
+      ].join("\n")
+    );
+    const result = await discoverToolchain({
+      projectRoot,
+      platform: "android",
+      runOptions: { allArch: true },
+      mode: "safe",
+      runner: fixtureRunner((request) => {
+        if (request.command.endsWith("java")) return { stderr: javaOutput };
+        throw new Error("ADB must not run for all-architecture builds");
+      }),
+      moduleResolver: (specifier, root) => {
+        expect(specifier).toBe("react-native/package.json");
+        expect(root).toBe(projectRoot);
+        return reactNativePackage;
+      },
+      env: {},
+      hostArch: "arm64",
+    });
+
+    expect(result).toEqual({
+      status: "available",
+      snapshot: {
+        platform: "android",
+        hostArch: "arm64",
+        compileSdkVersion: "35",
+        androidSdkPlatformRevision: "2",
+        buildToolsVersion: "35.0.0",
+        javaSpecificationVersion: "21",
+        javaVendorFamily: "adoptium",
+        jvmArch: "arm64",
+        gradleVersion: "8.13",
+        targetArchitecture: "all",
+      },
+    });
+  });
+
+  it("keeps safe caching available when AGP selects an undeclared build-tools version", async () => {
+    const projectRoot = makeAndroidProject();
+    fs.writeFileSync(
+      path.join(projectRoot, "android", "build.gradle"),
+      "android { compileSdk 35 }\n"
+    );
+    fs.rmSync(path.join(projectRoot, "android", "local.properties"));
+    const result = await discoverToolchain({
+      projectRoot,
+      platform: "android",
+      runOptions: { allArch: true },
+      mode: "safe",
+      runner: fixtureRunner((request) => {
+        if (request.command.endsWith("java")) return { stderr: javaOutput };
+        throw new Error("ADB must not run for all-architecture builds");
+      }),
+      env: {},
+      hostArch: "arm64",
+    });
+
+    expect(result).toEqual({
+      status: "available",
+      snapshot: {
+        platform: "android",
+        hostArch: "arm64",
+        javaSpecificationVersion: "21",
+        javaVendorFamily: "adoptium",
+        jvmArch: "arm64",
+        gradleVersion: "8.13",
+        targetArchitecture: "all",
+      },
+    });
+  });
+
+  it("keeps the prior safe key when a recognizable Expo catalog cannot be resolved", async () => {
+    const projectRoot = makeAndroidProject();
+    fs.writeFileSync(
+      path.join(projectRoot, "android", "build.gradle"),
+      'apply plugin: "expo-root-project"\n'
+    );
+    fs.writeFileSync(
+      path.join(projectRoot, "android", "settings.gradle"),
+      "expoAutolinking.useExpoVersionCatalog()\n"
+    );
+    fs.mkdirSync(path.join(projectRoot, "android", "app"), {
+      recursive: true,
+    });
+    fs.writeFileSync(
+      path.join(projectRoot, "android", "app", "build.gradle"),
+      [
+        "android {",
+        "  buildToolsVersion rootProject.ext.buildToolsVersion",
+        "  compileSdk rootProject.ext.compileSdkVersion",
+        "}",
+      ].join("\n")
+    );
+    const result = await discoverToolchain({
+      projectRoot,
+      platform: "android",
+      runOptions: { allArch: true },
+      mode: "safe",
+      moduleResolver: () => {
+        throw Object.assign(new Error("not installed"), {
+          code: "MODULE_NOT_FOUND",
+        });
+      },
+      runner: fixtureRunner((request) => {
+        if (request.command.endsWith("java")) return { stderr: javaOutput };
+        throw new Error("ADB must not run for all-architecture builds");
+      }),
+      env: {},
+      hostArch: "arm64",
+    });
+
+    expect(result).toMatchObject({
+      status: "available",
+      snapshot: {
+        platform: "android",
+        gradleVersion: "8.13",
+        targetArchitecture: "all",
+      },
+    });
+    if (result.status === "available") {
+      expect(result.snapshot).not.toHaveProperty("compileSdkVersion");
+      expect(result.snapshot).not.toHaveProperty("buildToolsVersion");
+    }
+  });
+
+  it("changes deterministic SDK signals when an installed selected package revision changes", async () => {
+    const projectRoot = makeAndroidProject();
+    const runner = fixtureRunner((request) => {
+      if (request.command.endsWith("java")) return { stderr: javaOutput };
+      throw new Error("ADB must not run for all-architecture builds");
+    });
+    const discover = () =>
+      discoverToolchain({
+        projectRoot,
+        platform: "android" as const,
+        runOptions: { allArch: true },
+        mode: "safe" as const,
+        runner,
+        hostArch: "arm64",
+        env: {},
+      });
+    const before = await discover();
+    fs.writeFileSync(
+      path.join(
+        projectRoot,
+        "android-sdk",
+        "platforms",
+        "android-35",
+        "source.properties"
+      ),
+      "Pkg.Revision=3\nAndroidVersion.ApiLevel=35\n"
+    );
+    const after = await discover();
+
+    expect(before).toMatchObject({
+      status: "available",
+      snapshot: { androidSdkPlatformRevision: "2" },
+    });
+    expect(after).toMatchObject({
+      status: "available",
+      snapshot: { androidSdkPlatformRevision: "3" },
+    });
+    expect(after).not.toEqual(before);
+  });
+
+  it("fails closed when required SDK metadata is missing, mismatched, or roots conflict", async () => {
+    const projectRoot = makeAndroidProject();
+    const runner = fixtureRunner((request) => {
+      if (request.command.endsWith("java")) return { stderr: javaOutput };
+      throw new Error("ADB must not run for all-architecture builds");
+    });
+    const request = {
+      projectRoot,
+      platform: "android" as const,
+      runOptions: { allArch: true },
+      mode: "safe" as const,
+      runner,
+      hostArch: "arm64",
+      env: {},
+    };
+    const platformProperties = path.join(
+      projectRoot,
+      "android-sdk",
+      "platforms",
+      "android-35",
+      "source.properties"
+    );
+    fs.rmSync(platformProperties);
+    expect(await discoverToolchain(request)).toEqual({
+      status: "unavailable",
+      reason: "missing-sdk",
+    });
+
+    fs.writeFileSync(
+      platformProperties,
+      "Pkg.Revision=2\nAndroidVersion.ApiLevel=34\n"
+    );
+    expect(await discoverToolchain(request)).toEqual({
+      status: "unavailable",
+      reason: "malformed-output",
+    });
+
+    expect(
+      await discoverToolchain({
+        ...request,
+        env: {
+          ANDROID_HOME: path.join(projectRoot, "android-sdk"),
+          ANDROID_SDK_ROOT: path.join(projectRoot, "different-sdk"),
+        },
+      })
+    ).toEqual({ status: "unavailable", reason: "malformed-output" });
   });
 
   it("correlates Expo's emulator selector through a unique bounded AVD name", async () => {

@@ -630,12 +630,19 @@ export const inventoryCache = (projectRoot: string): CacheCatalog => {
     "unsafe-entries-root"
   );
   const invalidEntriesBytes = Math.max(0, entriesStorageBytes - entriesBytes);
-  const stagingBytes = safeDirectorySize(
-    paths.providerRoot,
-    paths.stagingRoot,
-    issues,
-    "unsafe-staging-root"
-  );
+  const stagingBytes =
+    safeDirectorySize(
+      paths.providerRoot,
+      paths.stagingRoot,
+      issues,
+      "unsafe-staging-root"
+    ) +
+    safeDirectorySize(
+      paths.providerRoot,
+      paths.transferStagingRoot,
+      issues,
+      "unsafe-transfer-staging-root"
+    );
   const quarantineBytes = safeDirectorySize(
     paths.providerRoot,
     paths.quarantineRoot,
@@ -660,12 +667,19 @@ export const inventoryCache = (projectRoot: string): CacheCatalog => {
     issues,
     "unsafe-state-root"
   );
-  const locksBytes = safeDirectorySize(
-    paths.providerRoot,
-    paths.locksRoot,
-    issues,
-    "unsafe-locks-root"
-  );
+  const locksBytes =
+    safeDirectorySize(
+      paths.providerRoot,
+      paths.locksRoot,
+      issues,
+      "unsafe-locks-root"
+    ) +
+    safeDirectorySize(
+      paths.providerRoot,
+      paths.transferLocksRoot,
+      issues,
+      "unsafe-transfer-locks-root"
+    );
   const eventsBytes = safeDirectorySize(
     paths.providerRoot,
     paths.eventsRoot,
