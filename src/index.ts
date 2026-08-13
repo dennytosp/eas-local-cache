@@ -1,5 +1,4 @@
 import * as fs from "fs";
-import * as path from "path";
 
 import type {
   BuildCacheProviderPlugin,
@@ -8,17 +7,6 @@ import type {
   UploadBuildCacheProps,
 } from "@expo/config";
 
-import { inventoryCache } from "./cache/catalog";
-import {
-  claimAutomaticPruneAttempt,
-  rollbackAutomaticPruneAttempt,
-} from "./cache/automatic-prune-state";
-import { pruneCache } from "./cache/cleanup";
-import {
-  recordResolveEvent,
-  type ResolveExplanationCode,
-} from "./cache/events";
-import { ensureProviderRoot } from "./cache/filesystem";
 import { calculateProjectFingerprint } from "./cache/fingerprint";
 import { createEffectiveEnvironmentIdentity } from "./cache/environment-key";
 import {
@@ -26,411 +14,41 @@ import {
   normalizeRunProfile,
   readInsight,
   runProfilesEqual,
-  selectClosestInsight,
-  type EnvironmentEvidenceCategory,
-  type FingerprintSnapshot,
-  type InsightCandidate,
-  type RunProfile,
 } from "./cache/insight";
 import {
-  normalizeCacheOptions,
   normalizeCompressionOptions,
   normalizeEnvironmentOptions,
   normalizeLanOptions,
   type CacheProviderOptions,
 } from "./cache/options";
-import { getCachePaths, getEntryId, type CachePlatform } from "./cache/paths";
-import { writePolicyState } from "./cache/policy-state";
+import { getCachePaths, getEntryId } from "./cache/paths";
 import {
   elapsedMilliseconds,
   estimateArtifactReadyDuration,
   estimateTimeSaved,
   monotonicNow,
 } from "./cache/timing";
-import {
-  resolveCacheEntryDetailed,
-  uploadCacheEntry,
-  type CacheMissReason,
-} from "./cache/store";
+import { resolveCacheEntryDetailed, uploadCacheEntry } from "./cache/store";
 import { discoverToolchain } from "./cache/toolchain";
-import { readLanState, updateLanState } from "./lan/state";
+import { readLanState } from "./lan/state";
 import { fetchLanEntryToLocal, pushLanEntryToPeer } from "./lan/sync";
-
-type CalculationState = {
-  fingerprintHash: string;
-  snapshot: FingerprintSnapshot | null;
-  updatedAtMs: number;
-};
-
-const environmentEvidenceLabels: Record<
-  EnvironmentEvidenceCategory,
-  { code: ResolveExplanationCode; label: string }
-> = {
-  "build-profile": {
-    code: "build-profile-changed",
-    label:
-      "build configuration, variant, scheme, or architecture selection changed",
-  },
-  xcode: { code: "xcode-changed", label: "Xcode changed" },
-  "platform-sdk": {
-    code: "platform-sdk-changed",
-    label: "the platform SDK changed",
-  },
-  jdk: { code: "jdk-changed", label: "the JDK changed" },
-  gradle: { code: "gradle-changed", label: "Gradle changed" },
-  architecture: {
-    code: "architecture-changed",
-    label: "the host or target architecture changed",
-  },
-  "manual-environment": {
-    code: "manual-environment-changed",
-    label: "the manual environment context changed",
-  },
-  "key-schema": {
-    code: "environment-key-upgraded",
-    label: "the cache identity upgraded to environment-aware keying",
-  },
-};
-
-type PendingBuild = {
-  fingerprintHash: string;
-  missStartedAtMs: number;
-  ambiguous: boolean;
-  missReason: CacheMissReason;
-  compressedPayloadDigest?: string;
-  updatedAtMs: number;
-};
-
-const LIFECYCLE_STATE_TTL_MS = 30 * 60 * 1000;
-const MAX_LIFECYCLE_STATES = 128;
-const AUTOMATIC_HIT_PRUNE_THROTTLE_MS = 5 * 60 * 1000;
-
-const calculations = new Map<string, CalculationState>();
-const pendingBuilds = new Map<string, PendingBuild>();
-
-const pruneLifecycleMap = <State extends { updatedAtMs: number }>(
-  states: Map<string, State>,
-  nowMs: number
-): void => {
-  for (const [key, state] of states) {
-    if (nowMs - state.updatedAtMs >= LIFECYCLE_STATE_TTL_MS) {
-      states.delete(key);
-    }
-  }
-
-  if (states.size <= MAX_LIFECYCLE_STATES) {
-    return;
-  }
-  const oldest = [...states.entries()].sort(
-    ([leftKey, left], [rightKey, right]) =>
-      left.updatedAtMs - right.updatedAtMs || leftKey.localeCompare(rightKey)
-  );
-  for (const [key] of oldest.slice(0, states.size - MAX_LIFECYCLE_STATES)) {
-    states.delete(key);
-  }
-};
-
-const pruneLifecycleState = (nowMs = Date.now()): void => {
-  pruneLifecycleMap(calculations, nowMs);
-  pruneLifecycleMap(pendingBuilds, nowMs);
-};
-
-const setCalculation = (
-  key: string,
-  state: Omit<CalculationState, "updatedAtMs">,
-  nowMs: number
-): void => {
-  calculations.set(key, { ...state, updatedAtMs: nowMs });
-  pruneLifecycleMap(calculations, nowMs);
-};
-
-const setPendingBuild = (
-  key: string,
-  state: Omit<PendingBuild, "updatedAtMs">,
-  nowMs: number
-): void => {
-  pendingBuilds.set(key, { ...state, updatedAtMs: nowMs });
-  pruneLifecycleMap(pendingBuilds, nowMs);
-};
-
-const shortFingerprint = (fingerprintHash: string): string =>
-  fingerprintHash.replace(/[\r\n\t]/g, "").slice(0, 12);
-
-const recordLanPeerSuccess = async (
-  providerRoot: string,
-  peerId: string
-): Promise<void> => {
-  await updateLanState(providerRoot, (state) => {
-    const peer = state.outboundPeers.find(
-      (candidate) => candidate.peerId === peerId
-    );
-    if (peer) {
-      peer.lastSuccessAt = new Date().toISOString();
-      peer.updatedAt = peer.lastSuccessAt;
-    }
-  });
-};
-
-const getStateKey = (
-  projectRoot: string,
-  platform: CachePlatform,
-  profile: RunProfile,
-  fingerprintHash: string
-): string =>
-  JSON.stringify([
-    path.resolve(projectRoot),
-    platform,
-    profile,
-    fingerprintHash,
-  ]);
-
-const getProfileState = (props: {
-  projectRoot: string;
-  platform: CachePlatform;
-  runOptions: unknown;
-  fingerprintHash: string;
-}) => {
-  const profile = normalizeRunProfile(props.platform, props.runOptions);
-  return {
-    profile,
-    key: getStateKey(
-      props.projectRoot,
-      props.platform,
-      profile,
-      props.fingerprintHash
-    ),
-  };
-};
-
-const explanationForDirectReason = (
-  reason: CacheMissReason
-): { code: ResolveExplanationCode; message: string } => {
-  switch (reason) {
-    case "corrupt":
-      return {
-        code: "corrupt-entry",
-        message: "the previous cache entry failed integrity validation",
-      };
-    case "lock-busy":
-      return {
-        code: "writer-lock-busy",
-        message: "the cache entry is currently owned by another writer",
-      };
-    case "unsafe-legacy-path":
-      return {
-        code: "unsafe-legacy-path",
-        message: "the legacy fingerprint path was unsafe",
-      };
-    case "legacy-invalid":
-      return {
-        code: "legacy-invalid",
-        message: "the legacy artifact was incomplete or invalid",
-      };
-    case "compression-unavailable":
-      return {
-        code: "no-entry",
-        message:
-          "zstd is unavailable, so the compressed entry cannot be restored",
-      };
-    default:
-      return { code: "no-entry", message: "no matching local entry exists" };
-  }
-};
-
-const evidenceLabels = {
-  "expo-config": {
-    code: "expo-config-changed",
-    label: "Expo config or config plugins changed",
-  },
-  "native-dependencies": {
-    code: "native-dependencies-changed",
-    label: "native dependencies or autolinking changed",
-  },
-  "native-project": {
-    code: "native-project-changed",
-    label: "native project inputs changed",
-  },
-  "project-metadata": {
-    code: "project-metadata-changed",
-    label: "project metadata or patches changed",
-  },
-  other: {
-    code: "other-inputs-changed",
-    label: "other native fingerprint inputs changed",
-  },
-} as const;
-
-const findInsightExplanation = (
-  projectRoot: string,
-  current: FingerprintSnapshot
-): { code: ResolveExplanationCode; messages: string[] } => {
-  try {
-    const catalog = inventoryCache(projectRoot);
-    const candidates: InsightCandidate[] = [];
-    for (const entry of catalog.entries) {
-      if (entry.platform !== current.platform) {
-        continue;
-      }
-      try {
-        const insight = readInsight(entry.directory);
-        if (
-          insight &&
-          insight.entryId === entry.entryId &&
-          insight.fingerprintHash === entry.fingerprintHash &&
-          insight.platform === entry.platform
-        ) {
-          candidates.push({
-            insight,
-            entryId: entry.entryId,
-            createdAt: entry.createdAt,
-            lastAccessAt: entry.lastAccessedAt,
-          });
-        }
-      } catch {
-        // Doctor reports malformed optional metadata; resolution remains usable.
-      }
-    }
-
-    const closest = selectClosestInsight(current, candidates);
-    if (closest.status === "fingerprint-engine-mismatch") {
-      return {
-        code: "fingerprint-engine-mismatch",
-        messages: ["the Expo fingerprint engine version changed"],
-      };
-    }
-    if (
-      closest.status !== "match" ||
-      (closest.diff.total === 0 && closest.environmentDiff.total === 0)
-    ) {
-      return {
-        code: "no-compatible-insight",
-        messages: ["no compatible prior fingerprint evidence is available"],
-      };
-    }
-
-    const environmentGroups = closest.environmentDiff.groups.map(
-      ({ category, count }) => ({
-        code: environmentEvidenceLabels[category].code,
-        message: `${environmentEvidenceLabels[category].label} (${count} field${
-          count === 1 ? "" : "s"
-        })`,
-      })
-    );
-    const sourceGroups = closest.diff.groups.map(({ category, count }) => ({
-      code: evidenceLabels[category].code,
-      message: `${evidenceLabels[category].label} (${count} source${
-        count === 1 ? "" : "s"
-      })`,
-    }));
-    const groups = [...environmentGroups, ...sourceGroups].slice(0, 3);
-    const first = groups[0];
-    return {
-      code: first?.code ?? "no-compatible-insight",
-      messages: groups.map(({ message }) => message),
-    };
-  } catch {
-    return {
-      code: "no-compatible-insight",
-      messages: ["no compatible prior fingerprint evidence is available"],
-    };
-  }
-};
-
-const recordEvent = async (
-  props: ResolveBuildCacheProps,
-  input: {
-    outcome: "hit" | "miss" | "error";
-    lookupDurationMs: number;
-    explanationCode: ResolveExplanationCode;
-    estimatedTimeSavedMs?: number;
-  }
-): Promise<void> => {
-  try {
-    const projectRoot = fs.realpathSync(props.projectRoot);
-    const paths = getCachePaths(projectRoot);
-    ensureProviderRoot(projectRoot, paths.providerRoot);
-    const result = await recordResolveEvent(
-      paths.providerRoot,
-      paths.eventsRoot,
-      {
-        platform: props.platform,
-        entryId: getEntryId(props.platform, props.fingerprintHash),
-        ...input,
-      }
-    );
-    if (result.status === "failed") {
-      console.warn("Could not record cache telemetry", result.error.message);
-    }
-  } catch (error) {
-    console.warn(
-      "Could not record cache telemetry",
-      error instanceof Error ? error.message : error
-    );
-  }
-};
-
-const runAutomaticPrune = async (input: {
-  projectRoot: string;
-  options: CacheProviderOptions;
-  protectedEntryId: string;
-  force: boolean;
-}): Promise<void> => {
-  try {
-    const policy = normalizeCacheOptions(input.options);
-    const managedProjectRoot = fs.realpathSync(input.projectRoot);
-    if (!policy.autoPrune && !input.force) {
-      return;
-    }
-
-    const paths = getCachePaths(managedProjectRoot);
-    writePolicyState(paths.providerRoot, paths.stateRoot, policy);
-    if (!policy.autoPrune) {
-      return;
-    }
-    const claim = await claimAutomaticPruneAttempt({
-      providerRoot: paths.providerRoot,
-      stateRoot: paths.stateRoot,
-      locksRoot: paths.locksRoot,
-      policy,
-      throttleMs: AUTOMATIC_HIT_PRUNE_THROTTLE_MS,
-      force: input.force,
-      now: new Date(Date.now()),
-    });
-    if (!claim.claimed) {
-      return;
-    }
-    let result;
-    try {
-      result = await pruneCache(managedProjectRoot, policy, {
-        protectedEntryIds: [input.protectedEntryId],
-      });
-    } catch (error) {
-      if (claim.claim) {
-        await rollbackAutomaticPruneAttempt({
-          providerRoot: paths.providerRoot,
-          stateRoot: paths.stateRoot,
-          locksRoot: paths.locksRoot,
-          claim: claim.claim,
-        }).catch(() => {});
-      }
-      throw error;
-    }
-    if (result.removed.length > 0) {
-      console.log(
-        `Pruned ${result.removed.length} old cache entr${
-          result.removed.length === 1 ? "y" : "ies"
-        } (${result.reclaimedBytes} bytes)`
-      );
-    }
-    if (!result.limitsSatisfied) {
-      console.warn(
-        "Cache limits remain exceeded because active or newly used entries were protected"
-      );
-    }
-  } catch (error) {
-    console.warn("Automatic cache cleanup was skipped", error);
-  }
-};
+import {
+  explanationForDirectReason,
+  findInsightExplanation,
+} from "./provider/explanations";
+import {
+  calculations,
+  getProfileState,
+  getStateKey,
+  pendingBuilds,
+  pruneLifecycleState,
+  setCalculation,
+  setPendingBuild,
+  shortFingerprint,
+} from "./provider/lifecycle";
+import { recordLanPeerSuccess } from "./provider/lan";
+import { runAutomaticPrune } from "./provider/maintenance";
+import { recordEvent } from "./provider/telemetry";
 
 const plugin: BuildCacheProviderPlugin<CacheProviderOptions> = {
   calculateFingerprintHash: async (
