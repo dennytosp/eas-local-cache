@@ -9,6 +9,8 @@ The provider runs in Expo CLI during native builds. It is not imported by the Re
 runtime, so the terminal output—not the rendered screen—is the source of truth for cache
 behavior.
 
+The example also configures the default 20 GiB, 50-entry, 14-day cleanup policy.
+
 ## Setup
 
 From the repository root, install and build the provider:
@@ -31,6 +33,7 @@ The verification checks all three integration points:
 - `package.json` links `eas-local-cache` from the repository root.
 - `app.json` configures `expo.buildCacheProvider` with that package.
 - The built package exports `resolveBuildCache` and `uploadBuildCache`.
+- The package exposes the `eas-local-cache` inspector binary.
 
 ## Test a real cache round trip
 
@@ -80,6 +83,18 @@ Run all example-level static checks and the provider-loading smoke test:
 ```bash
 bun run check
 ```
+
+Inspect the real cache created by native example builds:
+
+```bash
+bun run cache:stats
+bun run cache:list
+bun run cache:doctor
+bun run cache:prune
+```
+
+`cache:prune` is a dry run in this fixture, so it prints the real cleanup plan
+without removing the artifacts used by the next hit test.
 
 Individual commands are also available:
 

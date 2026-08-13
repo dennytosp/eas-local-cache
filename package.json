@@ -4,6 +4,9 @@
   "description": "An offline, self-healing build cache provider for local Expo CLI builds.",
   "main": "build/index.js",
   "types": "build/index.d.ts",
+  "bin": {
+    "eas-local-cache": "build/cli-bin.js"
+  },
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",

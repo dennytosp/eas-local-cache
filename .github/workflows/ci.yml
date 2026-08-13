@@ -68,4 +68,7 @@ jobs:
         run: |
           test -f build/index.js
           test -f build/index.d.ts
+          test -f build/cli-bin.js
+          node build/cli-bin.js --help
+          node build/cli-bin.js stats --project-root example --json
           npm pack --dry-run
