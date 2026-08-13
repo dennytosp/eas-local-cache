@@ -6,6 +6,8 @@ package's local-first, zero-account positioning.
 
 ## Milestone 1: Reliable Cache
 
+Status: implemented in pull request #18.
+
 - Versioned cache entries with a manifest and integrity digest
 - Atomic publication from a staging directory
 - Writer locking and stale-lock recovery
@@ -13,6 +15,8 @@ package's local-first, zero-account positioning.
 - HeroUI Native and Uniwind Expo example used for end-to-end verification
 
 ## Milestone 2: Self-Managing Cache
+
+Status: implemented on `feat/cache-inspector`.
 
 - `list`, `stats`, `doctor`, and `prune` CLI commands
 - Explicit size, entry-count, and retention limits

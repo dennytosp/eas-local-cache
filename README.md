@@ -16,6 +16,8 @@ instead of compiling it again.
 - **Fully local storage** with no upload, account, or external service
 - **Project-scoped caching** that works from subdirectories and monorepos
 - **Atomic and self-healing entries** that reject partial or corrupted builds
+- **Automatic storage limits** with TTL and least-recently-used cleanup
+- **Cache Inspector CLI** for capacity, entry, health, and prune operations
 - **Typed TypeScript implementation** with no runtime changes to your app
 
 ---
@@ -63,6 +65,12 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   ...config,
   buildCacheProvider: {
     plugin: "eas-local-cache",
+    options: {
+      maxSize: "20GB",
+      maxEntries: 50,
+      retentionDays: 14,
+      autoPrune: true,
+    },
   },
 });
 ```
@@ -73,7 +81,13 @@ Or use `app.json`:
 {
   "expo": {
     "buildCacheProvider": {
-      "plugin": "eas-local-cache"
+      "plugin": "eas-local-cache",
+      "options": {
+        "maxSize": "20GB",
+        "maxEntries": 50,
+        "retentionDays": 14,
+        "autoPrune": true
+      }
     }
   }
 }
@@ -96,6 +110,10 @@ The first run compiles the native app and stores its artifact. A later run with
 the same project fingerprint restores that artifact and launches it without
 recompiling.
 
+The options shown above are also the zero-config defaults. Sizes use binary
+multipliers, so `20GB` means 20 GiB. Set an individual limit to `null` to
+disable it, or set `autoPrune` to `false` to keep maintenance manual.
+
 ## How It Works
 
 1. Expo calculates a fingerprint from the native build inputs.
@@ -108,6 +126,33 @@ recompiling.
 Concurrent builds for the same fingerprint coordinate through a per-entry lock.
 Incomplete staging data is never used, and a versioned entry that fails its
 manifest or integrity checks is moved to quarantine and treated as a cache miss.
+
+After a successful upload, automatic maintenance removes expired data first and
+then least-recently-used entries until the size and entry-count soft caps are
+satisfied. The new artifact, recently returned artifacts, and active builds are
+protected. Maintenance failure never turns a successful native build into an
+error. The size cap covers valid and invalid entries, staging, quarantine, and
+trash. Operational metadata and backward-compatible legacy entries are reported
+by `stats` but are not deleted automatically.
+
+## Cache Inspector CLI
+
+Run the inspector from the Expo project root:
+
+```bash
+npx eas-local-cache stats
+npx eas-local-cache list
+npx eas-local-cache doctor
+npx eas-local-cache prune --dry-run
+npx eas-local-cache prune --max-size 10GB --max-entries 20 --retention-days 7
+```
+
+Every command accepts `--project-root <path>` and `--json` for automation.
+`doctor` performs the same full identity and integrity checks used by cache
+resolution without changing the cache. `prune
+--dry-run` uses the same planner as real and automatic cleanup. Stats report
+exact bytes and counts; hit rate and estimated time saved remain unavailable
+until resolve/build event telemetry is added.
 
 The cache is resolved from the project root supplied by Expo, not the current
 working directory. This keeps caches isolated when commands are run from a
@@ -123,6 +168,9 @@ Versioned artifacts are stored under `.expo/cache/eas-local-cache/v1`:
 | `staging/`    | Incomplete uploads, never used for cache hits |
 | `locks/`      | Per-entry writer coordination                 |
 | `quarantine/` | Invalid entries retained for diagnosis        |
+| `access/`     | Atomic last-used records and short leases     |
+| `state/`      | Last valid cleanup policy                     |
+| `trash/`      | Atomic removal tombstones                     |
 
 Each entry contains `artifact.app` or `artifact.apk` plus `manifest.json`. The
 directory name is a SHA-256 cache identity, so fingerprint values never become
@@ -155,10 +203,10 @@ control.
 
 ### Clear the local cache
 
-Delete the project cache and run the build again:
+Delete only this provider's project cache and run the build again:
 
 ```bash
-rm -rf .expo/cache
+rm -rf .expo/cache/eas-local-cache
 ```
 
 ### A cached artifact is invalid
