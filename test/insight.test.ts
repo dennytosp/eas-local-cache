@@ -118,7 +118,11 @@ describe("fingerprint source sanitization", () => {
     expect(serialized).not.toContain("secret-identity");
     expect(serialized).not.toContain("secret-contents");
     expect(serialized).not.toContain("unknown-secret-reason");
-    expect(EVIDENCE_CATEGORIES).toContain(result?.[2]?.categories[0]!);
+    const [firstCategory] = result?.[2]?.categories ?? [];
+    if (!firstCategory) {
+      throw new Error("Expected a native-dependencies category");
+    }
+    expect(EVIDENCE_CATEGORIES).toContain(firstCategory);
   });
 
   it("omits unsafe displays and rejects incomplete or oversized snapshots", () => {
