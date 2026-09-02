@@ -1,0 +1,76 @@
+name: Dependabot lockfile
+
+# Dependabot rewrites package.json but never regenerates bun.lock, so every npm
+# dependency pull request arrives with a manifest and a lockfile that disagree.
+# CI installs with `bun install --frozen-lockfile` and rejects the branch before
+# it reaches a single check: "lockfile had changes, but lockfile is frozen".
+#
+# This workflow resolves the new versions on the pull request branch and pushes
+# the refreshed lockfile back, which is the one piece of the update Dependabot
+# cannot produce on its own.
+
+on:
+  pull_request:
+    paths:
+      - package.json
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependabot-lockfile-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    name: Sync bun.lock
+    # Only Dependabot branches. A human opening a manifest change is expected to
+    # commit the matching lockfile, and CI already tells them when they forget.
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    permissions:
+      actions: write
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.head_ref }}
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # Resolution only: `--lockfile-only` writes the lockfile without creating
+      # node_modules, and bun never runs dependency lifecycle scripts. No code
+      # from the bumped package executes on a runner holding a write token.
+      - name: Resolve the updated dependencies
+        run: bun install --lockfile-only
+
+      - name: Commit the refreshed lockfile
+        id: commit
+        run: |
+          if git diff --quiet -- bun.lock; then
+            echo "::notice::bun.lock already agrees with package.json."
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add bun.lock
+          git commit -m "chore(deps): sync bun.lock with package.json"
+          git push origin "HEAD:$GITHUB_HEAD_REF"
+
+          echo "pushed=true" >> "$GITHUB_OUTPUT"
+
+      # A push authenticated with GITHUB_TOKEN deliberately cannot start another
+      # workflow run. Without this dispatch the pull request would keep showing
+      # the failed pre-sync result and never re-verify itself.
+      - name: Dispatch CI for the synced branch
+        if: steps.commit.outputs.pushed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run ci.yml --ref "$GITHUB_HEAD_REF"
